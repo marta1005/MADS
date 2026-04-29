@@ -1,0 +1,212 @@
+# ruff: noqa: N806
+
+from copy import deepcopy
+
+import numpy as np
+from numpy.testing import assert_allclose
+from numpy.typing import NDArray
+
+from multiads.assembly import Aircraft, AirfoilNACA4, Section, Span, Wing
+from multiads.assembly.envelope import Segment
+from multiads.disciplines import UserDefined
+from multiads.disciplines.mission import Mission
+from multiads.disciplines.weight_and_balance import WeightAndBalance
+from multiads.scenario import (
+    MADSScenario,
+    VariableFloat,
+    VariableFloatNP,
+)
+from multiads.scenario.aero_derivatives import AeroDerivativesVariable
+from multiads.scenario.stability_control_properties import StabilityControlVariable
+from multiads.solvers.mission.mission_low_fi import MissionSizing
+from multiads.solvers.mission.mission_low_fi import Options as MSOptions
+from multiads.solvers.weight_and_balance.wnb import WB
+from multiads.solvers.weight_and_balance.wnb import Options as WBOptions
+
+
+class TestMission:
+    def test_mission(self) -> None:
+        # Desing Variables
+        mass_aircraft = VariableFloat(name="mass", value=8000.0, lb=500, ub=10000.0)
+        climb_angle = VariableFloat(name="climb_angle", value=1.0, lb=0.0, ub=15.0)
+        cg_pos = VariableFloatNP(
+            name="cg_pos",
+            value=np.array([5.0, 1.0, 0.5]),
+            lb=np.array([0.0, 0.1, 0.0]),
+            ub=np.array([10.0, 1.2, 0.7]),
+        )
+
+        # Mission Segments
+        ClimbSegment = Segment(
+            name="climb",
+            type="ConstMaConstAoA",
+            climb_angle=climb_angle,
+            airspeed_start=150.0,
+            airspeed_end=200.0,
+        )
+
+        CruiseSegment = Segment(
+            name="cruise",
+            type="ConstMaConstAlt",
+            airspeed_start=200.0,
+            airspeed_end=150.0,
+        )
+
+        wing = Wing(
+            name="wing",
+            global_pos=cg_pos,
+            sections=[
+                Section(
+                    name="sec_1",
+                    airfoil=AirfoilNACA4("airfoil_1", 1, 2, 24),
+                    chord=2.0,
+                    twist=0.0,
+                ),
+                Section(
+                    name="sec_2",
+                    airfoil=AirfoilNACA4("airfoil_2", 2, 2, 12),
+                    chord=1.0,
+                    twist=-1.0,
+                ),
+            ],
+            spans=[
+                Span(name="span_1", length=10.0, sweep=5.0, dihed=2.0),
+            ],
+        )
+
+        # Component
+        aircraft = Aircraft(
+            name="Aircraft",
+            mass=mass_aircraft,
+            global_pos=cg_pos,
+        )
+
+        aero_deriv = AeroDerivativesVariable.zeros(f"{aircraft.name}.aero_derivatives")
+
+        # define dummy fucntion to assign derivatives
+        def aeroderivative_user() -> NDArray[np.float64]:
+            aero_derivatives = deepcopy(aero_deriv)
+            aero_derivatives.value[:] = 0.0
+            aero_derivatives.fx[0] = 0.4
+            return aero_derivatives.value_np
+
+        # define user defined discipline
+        AeroDer = UserDefined(
+            name="Aero Derivatives",
+            inputs=[],
+            outputs=[aero_deriv],
+            expression=aeroderivative_user,
+        )
+
+        # Weight and Balance
+        solverWB = WB(
+            options=WBOptions(
+                non_linear_inertia_factor=1.0,
+                inertia_vector=np.array(
+                    [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+            ),
+        )
+
+        # Discipline W&B
+        meas_weight = WeightAndBalance(
+            name="Weight",
+            components=[aircraft, wing],
+            solver=solverWB,
+        )
+
+        # Solver
+        # move some properties to the mission
+        solverMi = MissionSizing(
+            options=MSOptions(
+                gravitation=9.81,
+                aero_property_type="body",
+                phase_name=ClimbSegment.name,  # name of the phase to consider
+                segment_name=ClimbSegment.type,  # semgent used for mission sizing
+            ),
+        )
+
+        solverMiCruise = MissionSizing(
+            options=MSOptions(
+                gravitation=9.81,
+                aero_property_type="body",
+                phase_name=CruiseSegment.name,  # name of the phase to consider
+                segment_name=CruiseSegment.type,  # semgent used for mission sizing
+            ),
+        )
+
+        # Discipline for mission
+        mission_size_climb = Mission(
+            name="Mission-Sizing-Climb",
+            components=[aircraft],
+            segments=[ClimbSegment],
+            solver=solverMi,
+        )
+
+        mission_size_cruise = Mission(
+            name="Mission-Sizing-Cruise",
+            components=[aircraft],
+            segments=[CruiseSegment],
+            solver=solverMiCruise,
+        )
+
+        # missing variables  to be generated by fluid-dynamic simulation
+        aero_forces = StabilityControlVariable.zeros(
+            f"{aircraft.name}.stability_control_properties",
+        )
+
+        # define dummy function forces
+        def aeroforces_user() -> NDArray[np.float64]:
+            aero_forces_dummy = deepcopy(aero_forces)
+            aero_forces_dummy.value[:] = 0.0
+            aero_forces_dummy.lift = 100.0
+            aero_forces_dummy.drag = 20.0
+            return aero_forces_dummy.value_np
+
+        # define user defined discipline
+        AeroForce = UserDefined(
+            name="Aero-Dummy",
+            inputs=[],
+            outputs=[aero_forces],
+            expression=aeroforces_user,
+        )
+
+        # Scenario
+        scenario = MADSScenario()
+        scenario.fill_parameter_space([climb_angle, mass_aircraft, cg_pos])
+        scenario.create_scenario(
+            disciplines=[
+                meas_weight,
+                AeroForce,
+                AeroDer,
+                mission_size_climb,
+                mission_size_cruise,
+            ],
+            formulation="DisciplinaryOpt",
+            objective_name=f"{aircraft.name}.{ClimbSegment.name}.load_factor",
+            scenario_type="DOE",
+        )
+
+        scenario.add_observables(
+            [
+                f"{aircraft.name}.mass_properties",
+                f"{aircraft.name}.{CruiseSegment.name}.load_factor",
+            ],
+        )
+
+        scenario.execute(algo_name="PYDOE_FULLFACT", n_samples=32)
+
+        # Post process
+        data = scenario.to_dataset()
+        data_angle = data["designs"]["climb_angle"][0]
+        data_load = data["functions"][
+            f"{aircraft.name}.{ClimbSegment.name}.load_factor"
+        ][0]
+
+        assert_allclose(data_angle, [0.0, 15.0] * 16)
+        assert_allclose(data_load, [1.0, 0.965926] * 16, rtol=1e-6)
+
+
+if __name__ == "__main__":
+    test = TestMission()
+    test.test_mission()
