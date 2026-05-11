@@ -6,7 +6,15 @@ import numpy as np
 from gemseo.core.discipline import Discipline
 
 from multiads.assembly import MADSComponent, update_components
-from multiads.assembly.envelope import MADSPhase, Segment, update_segments
+
+try:
+    from multiads.assembly.envelope import MADSPhase, Segment, update_segments
+except ModuleNotFoundError:
+    MADSPhase = Any  # type: ignore[assignment]
+    Segment = Any  # type: ignore[assignment]
+
+    def update_segments(segments, input_data):  # type: ignore[no-redef]
+        del segments, input_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -177,3 +185,7 @@ class MADSDiscipline(Discipline):
         #        self.jac[var_in][var_out] = atleast_2d(
         #            array(jac[])
         #        )
+
+
+from multiads.disciplines.geometry import Geometry  # noqa: E402
+from multiads.disciplines.packaging import Packaging  # noqa: E402
