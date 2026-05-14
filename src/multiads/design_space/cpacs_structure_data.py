@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import inspect
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from numpy import inf
+
+try:
+    from lxml import etree
+except ImportError:  # pragma: no cover - optional dependency fallback
+    import xml.etree.ElementTree as etree
 
 from multiads.design_space.cpacs_mapping import CPACSMapping
 from multiads.design_space.cpacs_path_template import CPACSPathTemplate
@@ -69,11 +73,12 @@ class CPACSStructureData:
         self.__bounds = {}
         self.__processed_variables = {}
         self.__processed_args = {}
-        self.__path = path or Path()
+        self.__path = Path(path) if path else Path()
         self.__load_tigl = load_tigl
+        self.__file_name = file_name
 
         file_name = self.__path / file_name
-        self.__tree = ET.parse(file_name.as_posix())
+        self.__tree = etree.parse(file_name.as_posix())
 
         # if self.__load_tigl:
         #     self.__tigl = CPACSTigl(str(file_name))
@@ -82,6 +87,11 @@ class CPACSStructureData:
     def path(self) -> Path:
         """Get the path to the xml file."""
         return self.__path
+
+    @property
+    def file_name(self) -> str:
+        """Get the CPACS file name."""
+        return self.__file_name
 
     @property
     def variables(self) -> Iterable[str]:
@@ -365,7 +375,7 @@ class CPACSStructureData:
         """
         return len(self.__xml_find_xpath(xpath))
 
-    def __xml_find_xpath(self, xpath: str) -> list[ET]:
+    def _find_xpath(self, xpath: str) -> list[ET]:
         """Find XPath in xml tree.
 
         Args:
@@ -375,7 +385,37 @@ class CPACSStructureData:
             All xml elements found.
 
         """
-        return self.__tree.findall(xpath)
+        return self._CPACSStructureData__tree.findall(xpath)
+
+    def _get_xml_element(self, xpath: str) -> ET | None:
+        """Get a single xml element from XPath.
+
+        Args:
+            xpath: An XPath.
+
+        Returns:
+            A single element, or None if not found.
+
+        """
+        elements = self._find_xpath(xpath)
+        if len(elements) == 0:
+            return None
+        if len(elements) > 1:
+            msg = f"Multiple elements found for XPath: {xpath}"
+            raise ValueError(msg)
+        return elements[0]
+
+    def __xml_find_xpath(self, xpath: str) -> list[ET]:
+        """Find XPath in xml tree (internal).
+
+        Args:
+            xpath: An XPath.
+
+        Returns:
+            All xml elements found.
+
+        """
+        return self._CPACSStructureData__tree.findall(xpath)
 
     def write_xml(self, name_file: str, auto_process: bool = True) -> None:
         """Write an .xml file from data.

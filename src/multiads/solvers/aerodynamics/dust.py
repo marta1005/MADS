@@ -36,9 +36,9 @@ if TYPE_CHECKING:
 
 
 class DUST(BaseSolver):
-    def __init__(self, options: dl.Options) -> None:
+    def __init__(self, options: dl.Options | None = None) -> None:
         super().__init__()
-        self.options: dl.Options = options
+        self.options: dl.Options = options or dl.Options()
         self.driver: dl.Driver | None = None
         self.environment: Environment | None = None
         self.wings: Sequence[dl.Wing] | None = None
@@ -151,7 +151,15 @@ class DUST(BaseSolver):
         add_vars(environment, env_list, inputs)
 
         # Wings
-        wing_list = ["offset", "scaling", "pos", "alpha", "beta", "xc_ref", "roll"]
+        wing_list = [
+            "offset",
+            "scaling",
+            "global_pos",
+            "alpha",
+            "beta",
+            "xc_ref",
+            "roll",
+        ]
         span_list = ["length", "sweep", "dihed"]
         sec_list = ["chord", "twist"]
         airfoil_list = ["thickness_factor", "camber_factor"]
@@ -169,12 +177,12 @@ class DUST(BaseSolver):
                     add_vars(l_sec.airfoil, naca_list, inputs)
 
         # Propellers
-        prop_list = ["r_tip", "n_blades", "pitch", "rpm", "pos", "alpha", "beta"]
+        prop_list = ["r_tip", "n_blades", "pitch", "rpm", "global_pos", "alpha", "beta"]
         for l_prop in propellers:
             add_vars(l_prop, prop_list, inputs)
 
         # Fuselages
-        fus_list = ["maximum_width", "maximum_height", "length", "pos"]
+        fus_list = ["maximum_width", "maximum_height", "length", "global_pos"]
         for l_fus in fuselages:
             add_vars(l_fus, fus_list, inputs)
 
@@ -320,7 +328,11 @@ class DUST(BaseSolver):
         viz_analysis = self._create_visualization_analysis()
 
         if viz_analysis:
-            analyses = [*loads_analyses.values(), *span_analyses.values(), viz_analysis]
+            analyses = [
+                *loads_analyses.values(),
+                *span_analyses.values(),
+                viz_analysis,
+            ]
         else:
             analyses = [*loads_analyses.values(), *span_analyses.values()]
 
@@ -356,7 +368,8 @@ class DUST(BaseSolver):
 
         # Back to main directory
         os.chdir(main_dir)
-        shutil.rmtree(self.run_directory)
+        if not self.options.keep_run_directory:
+            shutil.rmtree(self.run_directory)
 
     def _create_loads_analyses(
         self,
@@ -375,6 +388,17 @@ class DUST(BaseSolver):
                     end_res=wing.options.loads_end,
                     step_res=wing.options.loads_step,
                     components=[wing.name],
+                )
+
+        for prop in propellers:
+            if prop.options.compute_loads:
+                analyses[prop.name] = dl.PostLoads(
+                    name=prop.name + "_loads",
+                    average=prop.options.loads_avg,
+                    start_res=prop.options.loads_start,
+                    end_res=prop.options.loads_end,
+                    step_res=prop.options.loads_step,
+                    components=[prop.name],
                 )
 
         if self.options.output_options.compute_loads:
@@ -408,25 +432,27 @@ class DUST(BaseSolver):
                     end_res=wing.options.spanwise_end,
                     step_res=wing.options.spanwise_step,
                     components=[wing.name],
+                    symmetric_geo=wing.symmetry,
                 )
         return analyses
 
     def _create_visualization_analysis(self) -> dl.PostViz | None:
         opts = self.options.output_options
-        if opts.visualization:
-            return dl.PostViz(
-                name="visualization",
-                average=opts.viz_avg,
-                start_res=opts.viz_start,
-                end_res=opts.viz_end,
-                step_res=opts.viz_step,
-                fmt=opts.viz_fmt,
-                wake=opts.viz_wake,
-                separate_wake=opts.viz_separate_wake,
-                variables=opts.viz_variables,
-                components=["all"],
-            )
-        return None
+        if not opts.visualization:
+            return None
+
+        return dl.PostViz(
+            name="visualization",
+            average=opts.viz_avg,
+            start_res=opts.viz_start,
+            end_res=opts.viz_end,
+            step_res=opts.viz_step,
+            fmt=opts.viz_fmt,
+            wake=opts.viz_wake,
+            separate_wake=opts.viz_separate_wake,
+            variables=opts.viz_variables,
+            components=["all"],
+        )
 
     def _process_loads_results(
         self,
@@ -456,11 +482,13 @@ class DUST(BaseSolver):
                 outputs[f"{prop.name}.force"].value = force
                 outputs[f"{prop.name}.thrust"].value = -force[0]
 
+                m_sign = 1.0 if prop.reverse else -1.0
+
                 moment = np.dot(environment.matrix_body_wind, loads.m[-1])
                 outputs[f"{prop.name}.moment"].value = moment
-                outputs[f"{prop.name}.torque"].value = -moment[0]
+                outputs[f"{prop.name}.torque"].value = m_sign * moment[0]
                 outputs[f"{prop.name}.power"].value = (
-                    -moment[0] * prop.rpm * np.pi / 30.0
+                    m_sign * moment[0] * prop.rpm * np.pi / 30.0
                 )
 
     def _process_spanwise_results(

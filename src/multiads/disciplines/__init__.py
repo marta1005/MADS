@@ -9,12 +9,12 @@ from multiads.assembly import MADSComponent, update_components
 
 try:
     from multiads.assembly.envelope import MADSPhase, Segment, update_segments
-except ModuleNotFoundError:
-    MADSPhase = Any  # type: ignore[assignment]
-    Segment = Any  # type: ignore[assignment]
+except ImportError:  # pragma: no cover - optional mission/envelope layer
+    MADSPhase = Any
+    Segment = Any
 
-    def update_segments(segments, input_data):  # type: ignore[no-redef]
-        del segments, input_data
+    def update_segments(segments: Any, input_data: Any) -> None:  # noqa: ARG001
+        return None
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from multiads.scenario import BaseVariable
     from multiads.solvers import BaseSolver
 
+# Logger
+from gemseo import LOGGER
 
 # TODO @Andres: Inherit from MADSDiscipline
 class UserDefined(Discipline):
@@ -94,13 +96,16 @@ class MADSDiscipline(Discipline):
         self.output_grammar_update({v.name: v.value_np for v in self.solver.outputs})
 
         # Settings for the Jacobian
-        self.set_jacobian_approximation(
-            jac_approx_type=self.solver.options.jac_approx_type,
-            jax_approx_step=self.solver.options.jac_approx_step,
-            jac_approx_n_processes=self.solver.options.jac_approx_n_processes,
-            jac_approx_use_threading=self.solver.options.jac_approx_use_threading,
-            jac_approx_wait_time=self.solver.options.jac_approx_wait_time,
-        )
+        if self.solver.options.jac_approx_type=="user":
+            LOGGER.info(f'SOLVER :: {type(self.solver).__name__} using user defined JACOBIAN')
+        else: 
+            self.set_jacobian_approximation(
+                jac_approx_type=self.solver.options.jac_approx_type,
+                jax_approx_step=self.solver.options.jac_approx_step,
+                jac_approx_n_processes=self.solver.options.jac_approx_n_processes,
+                jac_approx_use_threading=self.solver.options.jac_approx_use_threading,
+                jac_approx_wait_time=self.solver.options.jac_approx_wait_time,
+            )
 
     def input_grammar_update(self, inputs: Mapping[str, NDArray]) -> None:
         self.input_grammar.update_from_data(inputs)
@@ -141,13 +146,17 @@ class MADSDiscipline(Discipline):
 
     # TODO @Simone: function to compute derivatives
     def _derive_state(self) -> Mapping[str, Any]:
-        input_names = self.get_input_data_names()
-        output_names = self.get_output_data_names()
+        input_names = list(self.input_grammar.names)
+        output_names = list(self.output_grammar.names)
+        
+        solver_inputs = [inp for inp in self.solver.inputs if inp.name in input_names]
+        solver_outputs = [out for out in self.solver.outputs if out.name in output_names]
+        
         return self.solver.compute_sensitivities(
             input_names,
-            self.inputs,
+            solver_inputs,
             output_names,
-            self.outputs,
+            solver_outputs,
         )
 
     # TODO @Simone: Original definitions of functions in GEMSEO
@@ -160,32 +169,42 @@ class MADSDiscipline(Discipline):
         :param outputs: linearization should be performed on outputs list.
             If None, linearization should be performed
             on all outputs (Default value = None)
-
-                # ------------------------------------------------
-                # example: complete computation of the jacobian
-                # self.jac['max_resp']['wing_sweep'] = atleast_2d()
-                # self.jac['max_resp']['k_actuator'] =
-                # ------------------------------------------------
         """
-        self._init_jacobian(inputs, outputs, with_zeros=True)
-        ## compute Jacobian sourcing the correspongin solver solver
-        # get the inputs
-        inputs = self.get_inputs_by_name(*self.inputs)
-        # [SM]
-        outputs = self.get_outputs_by_name(*self.outputs)
-        # launch the compuation of the sensitivities
-        # return a structure of the jacobian consistent for the definition
-        # in GEMSEO
-        jac = self._derive_state(inputs, outputs)
-        # define Jacobian in GEMSEO
-        self.jac = jac
-        # for var_in in self.inputs:
-        #    self.jac[var_in] = {}
-        #    for var_out in self.outputs:
-        #        self.jac[var_in][var_out] = atleast_2d(
-        #            array(jac[])
-        #        )
-
-
-from multiads.disciplines.geometry import Geometry  # noqa: E402
-from multiads.disciplines.packaging import Packaging  # noqa: E402
+        if inputs is None:
+            input_names = list(self.input_grammar.names)
+        else:
+            input_names = list(inputs)
+            
+        if outputs is None:
+            output_names = list(self.output_grammar.names)
+        else:
+            output_names = list(outputs)
+        
+        solver_inputs = [inp for inp in self.solver.inputs if inp.name in input_names]
+        solver_outputs = [out for out in self.solver.outputs if out.name in output_names]
+        
+        jac = self.solver.compute_sensitivities(
+            input_names,
+            solver_inputs,
+            output_names,
+            solver_outputs,
+        )
+        
+        self.jac = {}
+        for out_name in output_names:
+            self.jac[out_name] = {}
+            if out_name in jac:
+                for inp_var in solver_inputs:
+                    inp_name = inp_var.name
+                    if inp_name in jac[out_name]:
+                        value = jac[out_name][inp_name]
+                        if value is not None and hasattr(value, 'shape'):
+                            if value.ndim == 0 or (value.ndim == 1 and value.shape[0] == 1):
+                                self.jac[out_name][inp_name] = np.atleast_2d(value.flatten())
+                            else:
+                                self.jac[out_name][inp_name] = np.atleast_2d(value)
+                    else:
+                        self.jac[out_name][inp_name] = np.zeros((1, len(inp_var.value_np)))
+            else:
+                for inp_var in solver_inputs:
+                    self.jac[out_name][inp_var.name] = np.zeros((1, len(inp_var.value_np)))

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
-from scipy.optimize import brentq
 
 from multiads.solvers.synthesis.geometry import (
     ResolvedStation,
@@ -23,21 +22,14 @@ if TYPE_CHECKING:
 
 
 CTA_LINEAR_START_INDEX = 4
-CTA_ROOT_FRONT_BLEND_FRACTION = 0.74
-CTA_ROOT_TE_FLATTEN_X_START = 0.92
 CTA_LOWER_FRONT_XC_SIGMA = 0.22
-CTA_UPPER_FRONT_XC_SIGMA = 0.24
-CTA_UPPER_FRONT_LE_XC_SIGMA = 0.10
 CTA_NOSE_HELPER_1_X_M = 5.418099
 CTA_NOSE_HELPER_1_Y_M = 1.9
 CTA_C1_LE_HELPER_X_M = 14.300099
 CTA_C1_Y_M = 5.694
-CTA_TE_INBOARD_BLEND_DX_M = 6.7
-CTA_TE_INBOARD_BLEND_Y_M = 7.5
-CTA_TE_INBOARD_RADIUS_FACTOR = 1.5
 CTA_MED_3_TE_HELPER_FRACTION = 0.78
 CTA_MED_3_TE_SWEEP_DEG = 0.0
-CTA_NUM_BASE_STATIONS = 41
+CTA_NUM_BASE_STATIONS = 101
 CTA_NUM_ROOT_BLEND_STATIONS = 25
 CTA_PLANFORM_CONTINUITY_ORDER = 2
 CTA_PLANFORM_BLEND_FRACTION = 0.24
@@ -45,9 +37,6 @@ CTA_PLANFORM_MIN_LINEAR_CORE_FRACTION = 0.58
 CTA_PLANFORM_TE_BLEND_FRACTION = 0.44
 CTA_PLANFORM_TE_MIN_LINEAR_CORE_FRACTION = 0.08
 CTA_PLANFORM_LE_LINEAR_START_INDEX = 4
-CTA_PLANFORM_TE_LINEAR_START_INDEX = 4
-CTA_PLANFORM_TE_EXACT_SEGMENTS = (0, 4)
-CTA_PLANFORM_TE_SPLINE_BRIDGE = (1, 3)
 CTA_PLANFORM_SYMMETRY_BLEND_Y = 1.9
 CTA_PLANFORM_SECTION_Y = np.asarray([0.0, 8.041, 12.5081007083, 39.4995], dtype=float)
 CTA_PLANFORM_SECTION_LE_X = np.asarray(
@@ -58,21 +47,6 @@ CTA_PLANFORM_SECTION_CHORD = np.asarray(
     [41.17952274, 13.9269627, 7.76845979406, 0.8],
     dtype=float,
 )
-
-CTA_ROOT_FRONT_TARGET_Y = np.asarray([0.0, 0.95, 1.9], dtype=float)
-CTA_ROOT_FRONT_TARGET_UPPER_Z_M = np.asarray(
-    [3.464835489580566, 3.460764218235223, 3.37393430087873],
-    dtype=float,
-)
-CTA_ROOT_FRONT_TARGET_LOWER_Z_M = np.asarray(
-    [-2.368597705825217, -2.4001434250887357, -2.313970660484542],
-    dtype=float,
-)
-CTA_ROOT_TE_CENTER_TARGET_Y = np.asarray([0.0, 0.95, 1.9], dtype=float)
-CTA_ROOT_TE_CENTER_TARGET_Z_M = np.asarray(
-    [0.8177956204143926, 0.8049039758261936, 0.8003107430812731],
-    dtype=float,
-)
 CTA_LOWER_FRONT_TARGET_Y = np.asarray(
     [0.0, 0.95, 1.9, 5.694, 8.041, 12.5081007083],
     dtype=float,
@@ -80,7 +54,7 @@ CTA_LOWER_FRONT_TARGET_Y = np.asarray(
 CTA_LOWER_FRONT_TARGET_Z_M = np.asarray(
     [
         -2.368597705825217,
-        -2.4001434250887357,
+        -2.3450000000000000,
         -2.313970660484542,
         -1.1961949471727737,
         -0.27848207538035497,
@@ -99,94 +73,11 @@ CTA_LOWER_FRONT_XC = np.asarray(
     ],
     dtype=float,
 )
-CTA_UPPER_FRONT_TARGET_Y = np.asarray([1.9, 5.694, 8.041, 12.5081007083], dtype=float)
-CTA_UPPER_FRONT_TARGET_Z_M = np.asarray(
-    [3.37393430087873, 2.684934294708757, 2.03570975256528, 1.2389898634240581],
-    dtype=float,
-)
-CTA_UPPER_FRONT_XC = np.asarray(
-    [0.22768048249248646, 0.26719273983744424, 0.27885565489049924, 0.38327731807204724],
-    dtype=float,
-)
-CTA_UPPER_LE_TARGET_Z_M = np.asarray(
-    [1.03474, 0.48145, 0.67693, 0.7299199999999999],
-    dtype=float,
-)
 
 
 def cosine_spacing(n: int) -> np.ndarray:
     beta = np.linspace(0.0, np.pi, int(n))
     return 0.5 * (1.0 - np.cos(beta))
-
-
-def quintic_c2_transition(
-    y: float,
-    y0: float,
-    y1: float,
-    x0: float,
-    x1: float,
-    dx0: float,
-    dx1: float,
-    ddx0: float = 0.0,
-    ddx1: float = 0.0,
-) -> float:
-    length = max(y1 - y0, 1.0e-12)
-    t = np.clip((y - y0) / length, 0.0, 1.0)
-    rhs = np.array(
-        [x0, dx0 * length, ddx0 * length * length, x1, dx1 * length, ddx1 * length * length],
-        dtype=float,
-    )
-    matrix = np.array(
-        [
-            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 2.0, 0.0, 0.0, 0.0],
-            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-            [0.0, 0.0, 2.0, 6.0, 12.0, 20.0],
-        ],
-        dtype=float,
-    )
-    coeffs = np.linalg.solve(matrix, rhs)
-    powers = np.array([1.0, t, t * t, t**3, t**4, t**5], dtype=float)
-    return float(coeffs @ powers)
-
-
-def with_root_blend(
-    interpolant: Callable[[float], float],
-    root_value: float,
-    root_blend_y: float,
-) -> Callable[[float], float]:
-    root_blend_y = float(max(root_blend_y, 0.0))
-    if root_blend_y <= 1.0e-12:
-        return interpolant
-
-    x1 = float(interpolant(root_blend_y))
-    eps = max(root_blend_y * 1.0e-4, 1.0e-6)
-    y_left = max(root_blend_y - eps, 0.0)
-    y_right = root_blend_y + eps
-    if y_right <= y_left:
-        dx1 = 0.0
-    else:
-        dx1 = (float(interpolant(y_right)) - float(interpolant(y_left))) / (y_right - y_left)
-
-    def wrapped(yy: float) -> float:
-        y_val = float(yy)
-        if y_val <= 0.0:
-            return float(root_value)
-        if y_val >= root_blend_y:
-            return float(interpolant(y_val))
-        return quintic_c2_transition(
-            y=y_val,
-            y0=0.0,
-            y1=root_blend_y,
-            x0=float(root_value),
-            x1=x1,
-            dx0=0.0,
-            dx1=float(dx1),
-        )
-
-    return wrapped
 
 
 def build_scalar_interpolant(
@@ -293,100 +184,23 @@ def _build_surface_xyz(
     return xyz
 
 
-def _front_local_envelope(
-    x_over_c: np.ndarray,
-    upper_z_over_c: np.ndarray,
-    lower_z_over_c: np.ndarray,
-    chord_m: float,
-    twist_deg: float,
-) -> tuple[float, float]:
-    theta = np.radians(float(twist_deg))
-    x_local = chord_m * np.asarray(x_over_c, dtype=float)
-    upper_local = chord_m * np.asarray(upper_z_over_c, dtype=float)
-    lower_local = chord_m * np.asarray(lower_z_over_c, dtype=float)
-    z_upper = x_local * np.sin(theta) + upper_local * np.cos(theta)
-    z_lower = x_local * np.sin(theta) + lower_local * np.cos(theta)
-    return float(np.max(z_upper)), float(np.min(z_lower))
-
-
-def _solve_twist_for_target_front_thickness(
+def _lower_min_z_world(
     *,
     x_over_c: np.ndarray,
-    upper_z_over_c: np.ndarray,
-    lower_z_over_c: np.ndarray,
-    chord_m: float,
-    current_twist_deg: float,
-    target_thickness_m: float,
-) -> float:
-    current_twist = float(current_twist_deg)
-
-    def residual(twist_deg: float) -> float:
-        local_upper, local_lower = _front_local_envelope(
-            x_over_c=x_over_c,
-            upper_z_over_c=upper_z_over_c,
-            lower_z_over_c=lower_z_over_c,
-            chord_m=chord_m,
-            twist_deg=float(twist_deg),
-        )
-        return float((local_upper - local_lower) - target_thickness_m)
-
-    grid = np.linspace(current_twist - 6.0, current_twist + 6.0, 121)
-    residuals = np.asarray([residual(float(value)) for value in grid], dtype=float)
-    candidate_intervals: list[tuple[float, float, float]] = []
-    for left, right, res_left, res_right in zip(
-        grid[:-1],
-        grid[1:],
-        residuals[:-1],
-        residuals[1:],
-        strict=True,
-    ):
-        if res_left == 0.0:
-            return float(left)
-        if res_left * res_right <= 0.0:
-            center = 0.5 * (float(left) + float(right))
-            candidate_intervals.append((abs(center - current_twist), float(left), float(right)))
-    if candidate_intervals:
-        _, left, right = min(candidate_intervals, key=lambda item: item[0])
-        return float(brentq(residual, left, right))
-    best_idx = int(np.argmin(np.abs(residuals)))
-    return float(grid[best_idx])
-
-
-def _apply_root_te_flatten(
-    *,
-    y_value: float,
-    x_over_c: np.ndarray,
-    upper_z_over_c: np.ndarray,
     lower_z_over_c: np.ndarray,
     chord_m: float,
     twist_deg: float,
     leading_edge_z_m: float,
-    target_te_center_fun: Callable[[float], float],
-) -> tuple[np.ndarray, np.ndarray]:
-    if y_value <= CTA_ROOT_TE_CENTER_TARGET_Y[0] + 1.0e-12 or y_value >= CTA_ROOT_TE_CENTER_TARGET_Y[-1] - 1.0e-12:
-        return upper_z_over_c, lower_z_over_c
+) -> float:
     theta = np.radians(float(twist_deg))
-    cos_theta = float(np.cos(theta))
-    if abs(chord_m * cos_theta) <= 1.0e-12:
-        return upper_z_over_c, lower_z_over_c
-    x_te = float(np.asarray(x_over_c, dtype=float)[-1]) * chord_m
-    current_te_center = (
+    x_local = np.asarray(x_over_c, dtype=float) * float(chord_m)
+    lower_local = np.asarray(lower_z_over_c, dtype=float) * float(chord_m)
+    z_world = (
         float(leading_edge_z_m)
-        + x_te * np.sin(theta)
-        + 0.5 * (float(upper_z_over_c[-1]) + float(lower_z_over_c[-1])) * chord_m * cos_theta
+        + x_local * np.sin(theta)
+        + lower_local * np.cos(theta)
     )
-    target_te_center = float(target_te_center_fun(float(y_value)))
-    delta_local = float((target_te_center - current_te_center) / (chord_m * cos_theta))
-    if abs(delta_local) <= 1.0e-12:
-        return upper_z_over_c, lower_z_over_c
-    t = np.clip(
-        (np.asarray(x_over_c, dtype=float) - CTA_ROOT_TE_FLATTEN_X_START)
-        / max(1.0 - CTA_ROOT_TE_FLATTEN_X_START, 1.0e-12),
-        0.0,
-        1.0,
-    )
-    aft_weight = t * t * (3.0 - 2.0 * t)
-    return upper_z_over_c + delta_local * aft_weight, lower_z_over_c + delta_local * aft_weight
+    return float(np.min(z_world))
 
 
 def _apply_lower_front_guidance(
@@ -406,90 +220,44 @@ def _apply_lower_front_guidance(
     cos_theta = float(np.cos(theta))
     if abs(chord_m * cos_theta) <= 1.0e-12:
         return lower_z_over_c
+
     x_air_arr = np.asarray(x_over_c, dtype=float)
     lower_arr = np.asarray(lower_z_over_c, dtype=float)
-    x_local = x_air_arr * chord_m
-    z_world = float(leading_edge_z_m) + x_local * np.sin(theta) + lower_arr * chord_m * cos_theta
-    current_lower = float(np.min(z_world))
+    current_lower = _lower_min_z_world(
+        x_over_c=x_air_arr,
+        lower_z_over_c=lower_arr,
+        chord_m=chord_m,
+        twist_deg=twist_deg,
+        leading_edge_z_m=leading_edge_z_m,
+    )
     target_lower = float(target_lower_fun(float(y_value)))
     delta_local = float((target_lower - current_lower) / (chord_m * cos_theta))
     if abs(delta_local) <= 1.0e-12:
         return lower_arr
+
     x_c_center = float(np.clip(x_c_min_fun(float(y_value)), 0.0, 1.0))
     sigma = float(max(CTA_LOWER_FRONT_XC_SIGMA, 1.0e-3))
     weight = np.exp(-0.5 * ((x_air_arr - x_c_center) / sigma) ** 2)
     return lower_arr + delta_local * weight
 
 
-def _apply_upper_front_guidance(
-    *,
-    y_value: float,
-    x_over_c: np.ndarray,
-    upper_z_over_c: np.ndarray,
-    chord_m: float,
-    twist_deg: float,
-    leading_edge_z_m: float,
-    target_upper_fun: Callable[[float], float],
-    x_c_max_fun: Callable[[float], float],
-) -> np.ndarray:
-    if y_value < CTA_UPPER_FRONT_TARGET_Y[0] - 1.0e-12 or y_value > CTA_UPPER_FRONT_TARGET_Y[2] + 1.0e-12:
-        return upper_z_over_c
-    theta = np.radians(float(twist_deg))
-    cos_theta = float(np.cos(theta))
-    if abs(chord_m * cos_theta) <= 1.0e-12:
-        return upper_z_over_c
-    x_air_arr = np.asarray(x_over_c, dtype=float)
-    upper_arr = np.asarray(upper_z_over_c, dtype=float)
-    x_local = x_air_arr * chord_m
-    z_world = float(leading_edge_z_m) + x_local * np.sin(theta) + upper_arr * chord_m * cos_theta
-    current_upper = float(np.max(z_world))
-    target_upper = float(target_upper_fun(float(y_value)))
-    delta_local = float((target_upper - current_upper) / (chord_m * cos_theta))
-    if abs(delta_local) <= 1.0e-12:
-        return upper_arr
-    x_c_center = float(np.clip(x_c_max_fun(float(y_value)), 0.0, 1.0))
-    sigma = float(max(CTA_UPPER_FRONT_XC_SIGMA, 1.0e-3))
-    weight = np.exp(-0.5 * ((x_air_arr - x_c_center) / sigma) ** 2)
-    return upper_arr + delta_local * weight
-
-
-def _apply_upper_le_guidance(
-    *,
-    y_value: float,
-    x_over_c: np.ndarray,
-    upper_z_over_c: np.ndarray,
-    chord_m: float,
-    twist_deg: float,
-    leading_edge_z_m: float,
-    target_le_fun: Callable[[float], float],
-) -> np.ndarray:
-    if y_value < CTA_UPPER_FRONT_TARGET_Y[0] - 1.0e-12 or y_value > CTA_UPPER_FRONT_TARGET_Y[-1] + 1.0e-12:
-        return upper_z_over_c
-    theta = np.radians(float(twist_deg))
-    cos_theta = float(np.cos(theta))
-    if abs(chord_m * cos_theta) <= 1.0e-12:
-        return upper_z_over_c
-    x_air_arr = np.asarray(x_over_c, dtype=float)
-    upper_arr = np.asarray(upper_z_over_c, dtype=float)
-    current_le = float(leading_edge_z_m) + float(upper_arr[0]) * chord_m * cos_theta
-    target_le = float(target_le_fun(float(y_value)))
-    delta_local = float((target_le - current_le) / (chord_m * cos_theta))
-    if abs(delta_local) <= 1.0e-12:
-        return upper_arr
-    sigma = float(max(CTA_UPPER_FRONT_LE_XC_SIGMA, 1.0e-3))
-    weight = np.exp(-0.5 * (x_air_arr / sigma) ** 2)
-    return upper_arr + delta_local * weight
-
-
 def _build_cta_law_set(
+    component: Wing,
     anchor_sections: tuple[Section, ...],
     config: WingGeometryConfig,
 ) -> CTAResolvedLawSet:
     anchor_stations = tuple(resolve_anchor_section(section, config) for section in anchor_sections)
     anchor_y = np.asarray([station.spanwise_y_m for station in anchor_stations], dtype=float)
     x_over_c = np.asarray(anchor_stations[0].x_over_c, dtype=float)
-    root_blend_y = float(CTA_ROOT_FRONT_BLEND_FRACTION * anchor_y[1])
-    planform = build_cta_planform()
+    section_y, section_le_x, section_chord = _cta_planform_arrays_from_sections(anchor_sections)
+    planform = build_cta_planform(
+        section_y=section_y,
+        section_le_x=section_le_x,
+        section_chord=section_chord,
+        med_3_te_sweep_deg=float(
+            getattr(component, "cta_med_3_te_sweep_deg", CTA_MED_3_TE_SWEEP_DEG)
+        ),
+    )
     leading_edge_x_fun = lambda yy: float(planform.le_x(float(yy)))
     chord_fun = lambda yy: float(planform.te_x(float(yy)) - planform.le_x(float(yy)))
 
@@ -534,41 +302,75 @@ def _build_cta_law_set(
     )
 
 
-def build_cta_planform():
+def _cta_planform_arrays_from_sections(
+    anchor_sections: tuple[Section, ...],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    section_by_label = {
+        str(section.metadata.get("cta_label")): section
+        for section in anchor_sections
+        if "cta_label" in section.metadata
+    }
+    required_labels = ("C0", "C3", "C4", "C5")
+    if not all(label in section_by_label for label in required_labels):
+        return (
+            CTA_PLANFORM_SECTION_Y.copy(),
+            CTA_PLANFORM_SECTION_LE_X.copy(),
+            CTA_PLANFORM_SECTION_CHORD.copy(),
+        )
+    return (
+        np.asarray([float(section_by_label[label].spanwise_y_m) for label in required_labels], dtype=float),
+        np.asarray([float(section_by_label[label].leading_edge_x_m) for label in required_labels], dtype=float),
+        np.asarray([float(section_by_label[label].chord) for label in required_labels], dtype=float),
+    )
+
+
+def build_cta_planform(
+    *,
+    section_y: np.ndarray | None = None,
+    section_le_x: np.ndarray | None = None,
+    section_chord: np.ndarray | None = None,
+    med_3_te_sweep_deg: float | None = None,
+):
+    section_y = CTA_PLANFORM_SECTION_Y if section_y is None else np.asarray(section_y, dtype=float)
+    section_le_x = CTA_PLANFORM_SECTION_LE_X if section_le_x is None else np.asarray(section_le_x, dtype=float)
+    section_chord = CTA_PLANFORM_SECTION_CHORD if section_chord is None else np.asarray(section_chord, dtype=float)
+    med_3_te_sweep_deg = (
+        CTA_MED_3_TE_SWEEP_DEG
+        if med_3_te_sweep_deg is None
+        else float(med_3_te_sweep_deg)
+    )
     leading_edge_points = np.asarray(
         [
-            (CTA_PLANFORM_SECTION_LE_X[0], CTA_PLANFORM_SECTION_Y[0]),
+            (section_le_x[0], section_y[0]),
             (CTA_NOSE_HELPER_1_X_M, CTA_NOSE_HELPER_1_Y_M),
             (CTA_C1_LE_HELPER_X_M, CTA_C1_Y_M),
-            (CTA_PLANFORM_SECTION_LE_X[1], CTA_PLANFORM_SECTION_Y[1]),
-            (CTA_PLANFORM_SECTION_LE_X[2], CTA_PLANFORM_SECTION_Y[2]),
-            (CTA_PLANFORM_SECTION_LE_X[3], CTA_PLANFORM_SECTION_Y[3]),
+            (section_le_x[1], section_y[1]),
+            (section_le_x[2], section_y[2]),
+            (section_le_x[3], section_y[3]),
         ],
         dtype=float,
     )
-    te_root = float(CTA_PLANFORM_SECTION_LE_X[0] + CTA_PLANFORM_SECTION_CHORD[0])
-    te_c3 = float(CTA_PLANFORM_SECTION_LE_X[1] + CTA_PLANFORM_SECTION_CHORD[1])
-    te_c4 = float(CTA_PLANFORM_SECTION_LE_X[2] + CTA_PLANFORM_SECTION_CHORD[2])
-    te_c5 = float(CTA_PLANFORM_SECTION_LE_X[3] + CTA_PLANFORM_SECTION_CHORD[3])
-    te_inboard_blend = float(np.clip(te_c3 + CTA_TE_INBOARD_BLEND_DX_M, te_c3, te_root))
+    te_root = float(section_le_x[0] + section_chord[0])
+    te_c3 = float(section_le_x[1] + section_chord[1])
+    te_c4 = float(section_le_x[2] + section_chord[2])
+    te_c5 = float(section_le_x[3] + section_chord[3])
     trailing_edge_points = np.asarray(
         [
             (te_root, 0.0),
             (te_root, CTA_C1_Y_M),
-            (te_inboard_blend, CTA_TE_INBOARD_BLEND_Y_M),
-            (te_c3, CTA_PLANFORM_SECTION_Y[1]),
-            (te_c4, CTA_PLANFORM_SECTION_Y[2]),
-            (te_c5, CTA_PLANFORM_SECTION_Y[3]),
+            (te_c3, section_y[1]),
+            (te_c4, section_y[2]),
+            (te_c5, section_y[3]),
         ],
         dtype=float,
     )
-    if abs(CTA_MED_3_TE_SWEEP_DEG) > 1.0e-12:
+    if abs(med_3_te_sweep_deg) > 1.0e-12:
         y_med3 = float(
-            CTA_PLANFORM_SECTION_Y[1]
-            + CTA_MED_3_TE_HELPER_FRACTION * (CTA_PLANFORM_SECTION_Y[2] - CTA_PLANFORM_SECTION_Y[1])
+            section_y[1]
+            + CTA_MED_3_TE_HELPER_FRACTION * (section_y[2] - section_y[1])
         )
         te_med3 = float(
-            te_c3 + np.tan(np.radians(CTA_MED_3_TE_SWEEP_DEG)) * (y_med3 - CTA_PLANFORM_SECTION_Y[1])
+            te_c3 + np.tan(np.radians(med_3_te_sweep_deg)) * (y_med3 - section_y[1])
         )
         trailing_edge_points = np.insert(
             trailing_edge_points,
@@ -576,11 +378,13 @@ def build_cta_planform():
             np.asarray([[te_med3, y_med3]], dtype=float),
             axis=0,
         )
+    te_linear_start_index = 4 if abs(med_3_te_sweep_deg) > 1.0e-12 else 3
+    te_exact_segments = (0, te_linear_start_index)
 
     return build_control_point_planform(
         leading_edge_points=leading_edge_points,
         trailing_edge_points=trailing_edge_points,
-        root_le_x=float(CTA_PLANFORM_SECTION_LE_X[0]),
+        root_le_x=float(section_le_x[0]),
         root_te_x=te_root,
         continuity_order=CTA_PLANFORM_CONTINUITY_ORDER,
         blend_fraction=CTA_PLANFORM_BLEND_FRACTION,
@@ -588,14 +392,13 @@ def build_cta_planform():
         te_blend_fraction=CTA_PLANFORM_TE_BLEND_FRACTION,
         te_min_linear_core_fraction=CTA_PLANFORM_TE_MIN_LINEAR_CORE_FRACTION,
         le_linear_start_index=CTA_PLANFORM_LE_LINEAR_START_INDEX,
-        te_linear_start_index=CTA_PLANFORM_TE_LINEAR_START_INDEX,
+        te_linear_start_index=te_linear_start_index,
         le_exact_segments=(),
-        te_exact_segments=CTA_PLANFORM_TE_EXACT_SEGMENTS,
+        te_exact_segments=te_exact_segments,
         le_spline_bridge=None,
-        te_spline_bridge=CTA_PLANFORM_TE_SPLINE_BRIDGE,
+        te_spline_bridge=None,
         symmetry_blend_y=CTA_PLANFORM_SYMMETRY_BLEND_Y,
         body_le_fixed_points=((CTA_NOSE_HELPER_1_X_M, CTA_NOSE_HELPER_1_Y_M), (CTA_C1_LE_HELPER_X_M, CTA_C1_Y_M)),
-        te_inboard_radius_factor=CTA_TE_INBOARD_RADIUS_FACTOR,
     )
 
 
@@ -605,7 +408,6 @@ def build_cta_span_station_array(
     anchor_sections: tuple[Section, ...],
     config: WingGeometryConfig,
 ) -> np.ndarray:
-    del component
     del config
     anchor_y = np.asarray([float(section.spanwise_y_m) for section in anchor_sections], dtype=float)
     half_span = float(anchor_y[-1])
@@ -613,7 +415,15 @@ def build_cta_span_station_array(
     root_blend_stations = np.array([], dtype=float)
     if CTA_PLANFORM_SYMMETRY_BLEND_Y > 1.0e-12:
         root_blend_stations = float(CTA_PLANFORM_SYMMETRY_BLEND_Y) * cosine_spacing(CTA_NUM_ROOT_BLEND_STATIONS)
-    planform = build_cta_planform()
+    section_y, section_le_x, section_chord = _cta_planform_arrays_from_sections(anchor_sections)
+    planform = build_cta_planform(
+        section_y=section_y,
+        section_le_x=section_le_x,
+        section_chord=section_chord,
+        med_3_te_sweep_deg=float(
+            getattr(component, "cta_med_3_te_sweep_deg", CTA_MED_3_TE_SWEEP_DEG)
+        ),
+    )
     planform_helper_stations = np.unique(
         np.concatenate(
             [
@@ -646,50 +456,33 @@ def build_cta_resolved_station_factory(
 ) -> Callable[[np.ndarray], tuple[ResolvedStation, ...]]:
     """Return a station resolver based on the native CTA interpolation laws."""
 
-    del component
-    law_set = _build_cta_law_set(anchor_sections, config)
+    law_set = _build_cta_law_set(component, anchor_sections, config)
     anchor_name_map = {
         round(float(section.spanwise_y_m), 10): section.name
         for section in anchor_sections
     }
-    target_root_upper_fun = build_scalar_interpolant(
-        CTA_ROOT_FRONT_TARGET_Y,
-        CTA_ROOT_FRONT_TARGET_UPPER_Z_M,
-        "pchip",
+    root_lower_z_over_c = _evaluate_profile_interpolants(
+        law_set.lower_profile_interpolants,
+        0.0,
     )
-    target_root_lower_fun = build_scalar_interpolant(
-        CTA_ROOT_FRONT_TARGET_Y,
-        CTA_ROOT_FRONT_TARGET_LOWER_Z_M,
-        "pchip",
+    root_lower_z_m = _lower_min_z_world(
+        x_over_c=law_set.x_over_c,
+        lower_z_over_c=root_lower_z_over_c,
+        chord_m=float(law_set.chord_fun(0.0)),
+        twist_deg=float(law_set.base_twist_fun(0.0)),
+        leading_edge_z_m=float(law_set.base_leading_edge_z_fun(0.0)),
     )
-    target_te_center_fun = build_scalar_interpolant(
-        CTA_ROOT_TE_CENTER_TARGET_Y,
-        CTA_ROOT_TE_CENTER_TARGET_Z_M,
-        "pchip",
+    lower_target_z_m = root_lower_z_m + (
+        CTA_LOWER_FRONT_TARGET_Z_M - CTA_LOWER_FRONT_TARGET_Z_M[0]
     )
     target_lower_fun = build_scalar_interpolant(
         CTA_LOWER_FRONT_TARGET_Y,
-        CTA_LOWER_FRONT_TARGET_Z_M,
+        lower_target_z_m,
         "pchip",
     )
     lower_x_c_fun = build_scalar_interpolant(
         CTA_LOWER_FRONT_TARGET_Y,
         CTA_LOWER_FRONT_XC,
-        "pchip",
-    )
-    target_upper_fun = build_scalar_interpolant(
-        CTA_UPPER_FRONT_TARGET_Y,
-        CTA_UPPER_FRONT_TARGET_Z_M,
-        "pchip",
-    )
-    upper_x_c_fun = build_scalar_interpolant(
-        CTA_UPPER_FRONT_TARGET_Y,
-        CTA_UPPER_FRONT_XC,
-        "pchip",
-    )
-    target_upper_le_fun = build_scalar_interpolant(
-        CTA_UPPER_FRONT_TARGET_Y,
-        CTA_UPPER_LE_TARGET_Z_M,
         "pchip",
     )
 
@@ -699,47 +492,9 @@ def build_cta_resolved_station_factory(
             upper_z_over_c = _evaluate_profile_interpolants(law_set.upper_profile_interpolants, float(y_value))
             lower_z_over_c = _evaluate_profile_interpolants(law_set.lower_profile_interpolants, float(y_value))
             chord_m = float(law_set.chord_fun(float(y_value)))
-            base_twist_deg = float(law_set.base_twist_fun(float(y_value)))
+            twist_deg = float(law_set.base_twist_fun(float(y_value)))
             leading_edge_x_m = float(law_set.leading_edge_x_fun(float(y_value)))
-            base_leading_edge_z_m = float(law_set.base_leading_edge_z_fun(float(y_value)))
-
-            if CTA_ROOT_FRONT_TARGET_Y[0] + 1.0e-12 < float(y_value) < CTA_ROOT_FRONT_TARGET_Y[-1] - 1.0e-12:
-                target_upper = float(target_root_upper_fun(float(y_value)))
-                target_lower = float(target_root_lower_fun(float(y_value)))
-                target_thickness = float(target_upper - target_lower)
-                twist_deg = _solve_twist_for_target_front_thickness(
-                    x_over_c=law_set.x_over_c,
-                    upper_z_over_c=upper_z_over_c,
-                    lower_z_over_c=lower_z_over_c,
-                    chord_m=chord_m,
-                    current_twist_deg=base_twist_deg,
-                    target_thickness_m=target_thickness,
-                )
-                local_upper, local_lower = _front_local_envelope(
-                    law_set.x_over_c,
-                    upper_z_over_c,
-                    lower_z_over_c,
-                    chord_m,
-                    twist_deg,
-                )
-                leading_edge_z_m = 0.5 * (
-                    (target_upper + target_lower)
-                    - (float(local_upper) + float(local_lower))
-                )
-            else:
-                twist_deg = base_twist_deg
-                leading_edge_z_m = base_leading_edge_z_m
-
-            upper_z_over_c, lower_z_over_c = _apply_root_te_flatten(
-                y_value=float(y_value),
-                x_over_c=law_set.x_over_c,
-                upper_z_over_c=upper_z_over_c,
-                lower_z_over_c=lower_z_over_c,
-                chord_m=chord_m,
-                twist_deg=twist_deg,
-                leading_edge_z_m=leading_edge_z_m,
-                target_te_center_fun=target_te_center_fun,
-            )
+            leading_edge_z_m = float(law_set.base_leading_edge_z_fun(float(y_value)))
             lower_z_over_c = _apply_lower_front_guidance(
                 y_value=float(y_value),
                 x_over_c=law_set.x_over_c,
@@ -749,25 +504,6 @@ def build_cta_resolved_station_factory(
                 leading_edge_z_m=leading_edge_z_m,
                 target_lower_fun=target_lower_fun,
                 x_c_min_fun=lower_x_c_fun,
-            )
-            upper_z_over_c = _apply_upper_front_guidance(
-                y_value=float(y_value),
-                x_over_c=law_set.x_over_c,
-                upper_z_over_c=upper_z_over_c,
-                chord_m=chord_m,
-                twist_deg=twist_deg,
-                leading_edge_z_m=leading_edge_z_m,
-                target_upper_fun=target_upper_fun,
-                x_c_max_fun=upper_x_c_fun,
-            )
-            upper_z_over_c = _apply_upper_le_guidance(
-                y_value=float(y_value),
-                x_over_c=law_set.x_over_c,
-                upper_z_over_c=upper_z_over_c,
-                chord_m=chord_m,
-                twist_deg=twist_deg,
-                leading_edge_z_m=leading_edge_z_m,
-                target_le_fun=target_upper_le_fun,
             )
             upper_surface_xyz_m = _build_surface_xyz(
                 law_set.x_over_c,

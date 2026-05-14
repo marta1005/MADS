@@ -1,17 +1,21 @@
-"""Private pyGeo export helpers for synthesis geometry workflows."""
+"""pyGeo export helpers for resolved wing geometry workflows."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from multiads.solvers.synthesis._geometry_types import PreparedGeometry, PyGeoExportResult, ResolvedStation
 from multiads.utilities.pyspline_loader import ensure_local_dependency_paths, load_pygeo_class, patch_pyspline_for_pygeo
+
+if TYPE_CHECKING:
+    from multiads.solvers.synthesis.geometry_lib import PreparedGeometry, PyGeoExportResult, ResolvedStation
 
 
 def export_prepared_geometry_to_pygeo(geometry: PreparedGeometry) -> PyGeoExportResult:
     """Export a resolved geometry state to pyGeo/IGES artifacts."""
+    from multiads.solvers.synthesis.geometry_lib import PyGeoExportResult
 
     export_cfg = geometry.config.export
     profiles_dir, iges_path, meshing_iges_path, frame_only_iges_path = _resolve_export_paths(geometry)

@@ -1,183 +1,265 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from assembly import MADSComponent, Aircraft, Wing, Environment, MassProperties, AerodynamicProperties
-from scenario import Variable
-from solvers import SolverFactory, BaseSolver
-import solvers.synthesis.synthesis_lib as dl
+from multiads.assembly import (
+    Aircraft,
+    Environment,
+    MADSComponent,
+    Wing,
+    copy_components,
+    flatten_components,
+)
+from multiads.scenario import BaseVariable, InnerVariable, InnerVariableFloat
+from multiads.scenario.aero_derivatives import AeroDerivativeReferenceFrame, AeroDerivativesVariable
+from multiads.scenario.mass_properties import MassPropertiesVariable
+from multiads.solvers import BaseSolver
+from multiads.solvers.synthesis.synthesis_lib import (
+    Aircraft as DSAircraft,
+    Driver,
+    Options,
+    Wing as WSWing,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
-def body_AeroDerivatives_alpha(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_alpha = driver.body_AeroDerivatives_alpha()
-    return np.array(body_AeroDerivatives_alpha)
+def body_AeroDerivatives_alpha(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_alpha()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_beta(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_beta = driver.body_AeroDerivatives_beta()
-    return np.array(body_AeroDerivatives_beta)
+def body_AeroDerivatives_beta(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_beta()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_p(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_p = driver.body_AeroDerivatives_p()
-    return np.array(body_AeroDerivatives_p)
+def body_AeroDerivatives_p(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_p()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_q(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_q = driver.body_AeroDerivatives_q()
-    return np.array(body_AeroDerivatives_q)
+def body_AeroDerivatives_q(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_q()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_r(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_r = driver.body_AeroDerivatives_r()
-    return np.array(body_AeroDerivatives_r)
+def body_AeroDerivatives_r(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_r()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_alpha_dot(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_alpha_dot = driver.body_AeroDerivatives_alpha_dot()
-    return np.array(body_AeroDerivatives_alpha_dot)
+def body_AeroDerivatives_alpha_dot(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_alpha_dot()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_beta_dot(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_beta_dot = driver.body_AeroDerivatives_beta_dot()
-    return np.array(body_AeroDerivatives_beta_dot)
+def body_AeroDerivatives_beta_dot(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_beta_dot()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_pitching(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_pitching = driver.body_AeroDerivatives_pitching()
-    return np.array(body_AeroDerivatives_pitching)
+def body_AeroDerivatives_pitching(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_pitching()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_yawing(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_yawing = driver.body_AeroDerivatives_yawing()
-    return np.array(body_AeroDerivatives_yawing)
+def body_AeroDerivatives_yawing(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_yawing()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_delta_aileron(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_delta_aileron = driver.body_AeroDerivatives_delta_aileron()
-    return np.array(body_AeroDerivatives_delta_aileron)
+def body_AeroDerivatives_delta_aileron(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_delta_aileron()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_delta_elevator(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_delta_elevator = driver.body_AeroDerivatives_delta_elevator()
-    return np.array(body_AeroDerivatives_delta_elevator)
+def body_AeroDerivatives_delta_elevator(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_delta_elevator()
+    return np.asarray(result)
 
 
-def body_AeroDerivatives_delta_rudder(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    body_AeroDerivatives_delta_rudder = driver.body_AeroDerivatives_delta_rudder()
-    return np.array(body_AeroDerivatives_delta_rudder)
+def body_AeroDerivatives_delta_rudder(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.body_AeroDerivatives_delta_rudder()
+    return np.asarray(result)
 
 
-def thetas_new(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    thetas_new = driver.thetas_deformed()
-    return np.asarray(thetas_new)
+def thetas_new(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.thetas_deformed()
+    return np.asarray(result)
 
 
-def dihedrals_new(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    dihedrals_new = driver.dihedrals_deformed()
-    print(dihedrals_new)
-    return np.asarray(dihedrals_new)
+def dihedrals_new(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.dihedrals_deformed()
+    return np.asarray(result)
 
 
-def spans_new(name: str, driver: dl.DSdriver, **kwargs: Any) -> NDArray[np.float_]:
-    spans_new = driver.spans_deformed()
-    return np.asarray(spans_new)
+def spans_new(name: str, driver: Driver, **kwargs: Any) -> NDArray[np.float64]:
+    result = driver.spans_deformed()
+    return np.asarray(result)
 
 
+IMPLEMENTED_OUTPUTS = {
+    "body_AeroDerivatives_alpha": body_AeroDerivatives_alpha,
+    "body_AeroDerivatives_beta": body_AeroDerivatives_beta,
+    "body_AeroDerivatives_p": body_AeroDerivatives_p,
+    "body_AeroDerivatives_q": body_AeroDerivatives_q,
+    "body_AeroDerivatives_r": body_AeroDerivatives_r,
+    "body_AeroDerivatives_alpha_dot": body_AeroDerivatives_alpha_dot,
+    "body_AeroDerivatives_beta_dot": body_AeroDerivatives_beta_dot,
+    "body_AeroDerivatives_pitching": body_AeroDerivatives_pitching,
+    "body_AeroDerivatives_yawing": body_AeroDerivatives_yawing,
+    "body_AeroDerivatives_delta_aileron": body_AeroDerivatives_delta_aileron,
+    "body_AeroDerivatives_delta_elevator": body_AeroDerivatives_delta_elevator,
+    "body_AeroDerivatives_delta_rudder": body_AeroDerivatives_delta_rudder,
+    "thetas_new": thetas_new,
+    "spans_new": spans_new,
+    "dihedrals_new": dihedrals_new,
+}
 
 
-@SolverFactory.register("design_synthesis", "synthesis")
-class DS(BaseSolver):
+class DesignSynthesis(BaseSolver):
+    def __init__(self, options: Options | None = None) -> None:
+        super().__init__()
+        self.options: Options = options or Options()
+        self.driver: Driver | None = None
+        self.aircraft: Aircraft | None = None
+        self.wings: list[Wing] | None = None
+        self.environment: Environment | None = None
+        self.inputs_map: dict[str, BaseVariable] | None = None
+        self.outputs_map: dict[str, InnerVariable] | None = None
 
-    required_variables = {
-        Environment: Environment.attributes(),
-        MassProperties: MassProperties.attributes(),
-        AerodynamicProperties: AerodynamicProperties.attributes(),
-        Aircraft: Aircraft.attributes(),
-        Wing: Wing.attributes(),
-    }
+    def parse_variables(
+        self,
+        components: Sequence[MADSComponent],
+        *argv: Any,  # noqa: ANN401, ARG002
+    ) -> Sequence[MADSComponent]:
+        _components = copy_components(components)
+        components_flat = flatten_components(_components)
 
-    implemented_outputs = {
-        "body_AeroDerivatives_alpha": body_AeroDerivatives_alpha,
-        "body_AeroDerivatives_beta": body_AeroDerivatives_beta,
-        "body_AeroDerivatives_p": body_AeroDerivatives_p,
-        "body_AeroDerivatives_q": body_AeroDerivatives_q,
-        "body_AeroDerivatives_r": body_AeroDerivatives_r,
-        "body_AeroDerivatives_alpha_dot": body_AeroDerivatives_alpha_dot,
-        "body_AeroDerivatives_beta_dot": body_AeroDerivatives_beta_dot,
-        "body_AeroDerivatives_pitching": body_AeroDerivatives_pitching,
-        "body_AeroDerivatives_yawing": body_AeroDerivatives_yawing,
-        "body_AeroDerivatives_delta_aileron": body_AeroDerivatives_delta_aileron,
-        "body_AeroDerivatives_delta_elevator": body_AeroDerivatives_delta_elevator,
-        "body_AeroDerivatives_delta_rudder": body_AeroDerivatives_delta_rudder,
-        "thetas_new": thetas_new,
-        "spans_new": spans_new,
-        "dihedrals_new": dihedrals_new,
-    }
+        try:
+            ac = (c for c in components_flat if isinstance(c, Aircraft))
+            self.aircraft = next(ac)
+        except StopIteration:
+            msg = f"An aircraft must be provided to solver '{type(self).__name__}'."
+            raise ValueError(msg) from None
 
-    def __init__(self) -> None:
-        # options of the solver in separated holde
-        self.options = dl.DSoptions()
-        # simulation driver
-        self.driver = None
-        # components
-        self.aircraft = None
-        self.wings = None
-        self.environment = None
+        try:
+            env = (c for c in components_flat if isinstance(c, Environment))
+            self.environment = next(env)
+        except StopIteration:
+            msg = f"An environment must be provided to solver '{type(self).__name__}'."
+            raise ValueError(msg) from None
 
-    def get_state(self) -> list[MADSComponent]:
-        return [self.environment, *self.aircraft, *self.wings]
+        self.wings = [c for c in components_flat if isinstance(c, Wing)]
 
-    def set_state(self, components: list[MADSComponent]) -> None:
+        inputs: list[BaseVariable] = []
 
-        self.aircraft = filter(lambda x: isinstance(x, Aircraft), components)
-        self.aircraft = list(map(lambda x: dl.Aircraft.from_component(x), self.aircraft))
-        
-        self.wings = filter(lambda x: isinstance(x, Wing), components)
-        self.wings = list(map(lambda x: dl.Wing.from_component(x), self.wings))
+        dvars = ["height", "speed", "alpha", "beta", "gamma"]
+        inputs.extend(v for k, v in self.environment.variables.items() if k in dvars)
 
-        self.environment = filter(lambda x: isinstance(x, Environment), components)
-        self.environment = next(self.environment)
+        if self.aircraft:
+            dvars = ["mass", "global_pos"]
+            inputs.extend(v for k, v in self.aircraft.variables.items() if k in dvars)
 
-    def run(self):
-        # Run Synthesis Driver
-        self.driver = dl.DSdriver(
-            environment=self.environment,
-            aircraft=self.aircraft,
-            wings=self.wings
+            prefix = self.aircraft.name
+            inputs.extend(
+                [
+                    AeroDerivativesVariable.zeros(f"{prefix}.aero_derivatives"),
+                    MassPropertiesVariable.from_num_elements(f"{prefix}.mass_properties", 1),
+                ],
+            )
+
+        outputs: list[InnerVariable] = []
+
+        if self.aircraft:
+            for out_name in IMPLEMENTED_OUTPUTS.keys():
+                full_name = f"{self.aircraft.name}.{out_name}"
+                outputs.append(InnerVariableFloat(full_name, 0.0))
+
+        self.inputs = inputs
+        self.outputs = outputs
+        self.inputs_map = {v.name: v for v in self.inputs}
+        self.outputs_map = {v.name: v for v in self.outputs}
+
+        return [self.environment, self.aircraft, *self.wings]
+
+    def _run(self) -> None:
+        if self.aircraft is None or self.environment is None or self.inputs_map is None:
+            msg = f"Components in solver '{type(self).__name__}' not initialized."
+            raise RuntimeError(msg)
+
+        prefix = self.aircraft.name
+        aero_derivatives = self.inputs_map[f"{prefix}.aero_derivatives"]
+        mass_properties = self.inputs_map[f"{prefix}.mass_properties"]
+
+        aircraft_ds = DSAircraft.from_variables(
+            name=self.aircraft.name,
+            aerodynamicproperties=aero_derivatives,
+            massproperties=mass_properties,
         )
+
+        # wing rotation and displacement for mesh deformation
+        wing_displ_z = [0.0]
+        wing_rot_y = [0.0]
+
+        prefix = f"{self.aircraft.name}"
+        if hasattr(self.inputs_map, "wing_displ_z") and hasattr(self.inputs_map, "wing_displ_z"):
+            wing_displ_z = self.inputs_map[f"{prefix}.wing_displ_z"]
+            wing_rot_y = self.inputs_map[f"{prefix}.wing_rot_y"]
+
+        # recover wing from component
+        wings_list = [
+            WSWing.from_component(w, wing_displ_z=wing_displ_z, wing_rot_y=wing_rot_y)
+            for w in self.wings
+        ] if self.wings else []
+
+        self.driver = Driver(
+            aircraft=[aircraft_ds],
+            wings=wings_list,
+            environment=self.environment,
+            options=self.options,
+        )
+
         self.driver.compute_aircraft_properties()
         self.driver.find_nodes()
         self.driver.find_deform()
 
-    def compute_output(
+        if aero_derivatives is not None and isinstance(aero_derivatives, AeroDerivativesVariable):
+            aero_derivatives.reference_frame = AeroDerivativeReferenceFrame.BODY
+
+    def compute_output(self) -> None:
+        if self.driver is None:
+            msg = f"The driver of solver '{type(self).__name__}' is not initialized."
+            raise RuntimeError(msg)
+
+        if self.outputs is None or self.outputs_map is None:
+            msg = f"The outputs of solver '{type(self).__name__}' are not initialized"
+            raise RuntimeError(msg)
+
+        if self.aircraft is None:
+            return
+
+        for out in self.outputs:
+            out_name = out.name
+            if "." in out_name:
+                base_name = out_name.split(".", 1)[1]
+            else:
+                base_name = out_name
+
+            if base_name in IMPLEMENTED_OUTPUTS:
+                out_func = IMPLEMENTED_OUTPUTS[base_name]
+                out.value = out_func(out_name, self.driver)
+
+    def compute_sensitivities(
         self,
-        requested_outputs: list[str],
-        mapped_outputs: list[Variable],
-    ) -> dict[str, NDArray[np.float_]]:
-
-        """_summary_: post-process data if needed and collect results"""
-
-        outputs = {}
-
-        for out in requested_outputs:
-            if output_var := next((o for o in mapped_outputs if o.name == out), False):
-
-                # Callback options
-                out_options = output_var.options.get("synthesis", {})
-                out_type = output_var.output_type
-
-                # Callback
-                try:
-                    out_function = DS.implemented_outputs[out_type]
-                    outputs[out] = out_function(out, self.driver, **out_options)
-                except KeyError:
-                    raise ValueError(
-                        f"'{type(self).__name__}' cannot compute '{out_type}'"
-                    )
-
-                # Debug
-                #print(f"{out} = {outputs[out]}")
-
-        return outputs
+        input_names: Sequence[str],  # noqa: ARG002
+        inputs: Sequence[BaseVariable],  # noqa: ARG002
+        output_names: Sequence[str],  # noqa: ARG002
+        outputs: Sequence[BaseVariable],  # noqa: ARG002
+    ) -> Mapping[str, NDArray]:
+        return {}

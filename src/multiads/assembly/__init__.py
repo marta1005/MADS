@@ -650,8 +650,8 @@ class AirfoilCST(Airfoil):
     def __init__(
         self,
         name: str,
-        upper_coefficients: Sequence[float],
-        lower_coefficients: Sequence[float],
+        upper_coefficients: Sequence[OptimizableFloat],
+        lower_coefficients: Sequence[OptimizableFloat],
         n1: OptimizableFloat = 0.5,
         n2: OptimizableFloat = 1.0,
         trailing_edge_thickness: OptimizableFloat = 0.0,
@@ -660,8 +660,24 @@ class AirfoilCST(Airfoil):
         polar_file: str | Path | None = None,
     ) -> None:
         super().__init__(name, thickness_factor, camber_factor, polar_file)
-        self.upper_coefficients = tuple(float(c) for c in upper_coefficients)
-        self.lower_coefficients = tuple(float(c) for c in lower_coefficients)
+        self._upper_coefficient_attrs = tuple(
+            f"_upper_coefficient_{idx}" for idx, _ in enumerate(upper_coefficients)
+        )
+        self._lower_coefficient_attrs = tuple(
+            f"_lower_coefficient_{idx}" for idx, _ in enumerate(lower_coefficients)
+        )
+        for attr_name, coefficient in zip(
+            self._upper_coefficient_attrs,
+            upper_coefficients,
+            strict=True,
+        ):
+            setattr(self, attr_name, coefficient)
+        for attr_name, coefficient in zip(
+            self._lower_coefficient_attrs,
+            lower_coefficients,
+            strict=True,
+        ):
+            setattr(self, attr_name, coefficient)
         self.n1: float = n1
         self.n2: float = n2
         self.trailing_edge_thickness: float = trailing_edge_thickness
@@ -669,6 +685,14 @@ class AirfoilCST(Airfoil):
     @property
     def airfoil_name(self) -> str:
         return f"CST:{self.name}"
+
+    @property
+    def upper_coefficients(self) -> tuple[float, ...]:
+        return tuple(float(getattr(self, attr)) for attr in self._upper_coefficient_attrs)
+
+    @property
+    def lower_coefficients(self) -> tuple[float, ...]:
+        return tuple(float(getattr(self, attr)) for attr in self._lower_coefficient_attrs)
 
     @property
     def thickness(self) -> float:

@@ -32,7 +32,7 @@ class SpanloadsOptions(ComponentOptions):
         if loads is None:
             loads = {"span_load": SPANLOAD_DEFAULT_NUM_STATIONS}
         self.loads = {
-            k: v if v < 1 else SPANLOAD_DEFAULT_NUM_STATIONS for k, v in loads.items()
+            k: v if v > 0 else SPANLOAD_DEFAULT_NUM_STATIONS for k, v in loads.items()
         }
 
     @property
@@ -70,7 +70,7 @@ class LoadsAggregator(BaseSolver):
             opts = wing.options
             opts = next((o for o in opts if type(o) is SpanloadsOptions), None)
 
-            if opts := opts:
+            if opts:
                 for load_name, load_size in opts.loads.items():
                     loads.append(
                         SpanLoadsVariable.from_num_stations(
@@ -80,12 +80,12 @@ class LoadsAggregator(BaseSolver):
                     )
                     inputs.append(loads[-1])
 
-            outputs.append(
-                SpanLoadsGroupVariable.from_loads(
-                    f"{wing.name}.span_loads_group",
-                    loads,
-                ),
-            )
+                outputs.append(
+                    SpanLoadsGroupVariable.from_loads(
+                        f"{wing.name}.span_loads_group",
+                        loads,
+                    ),
+                )
 
         self.inputs = inputs
         self.outputs = outputs

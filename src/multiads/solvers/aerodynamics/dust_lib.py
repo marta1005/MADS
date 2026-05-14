@@ -11,14 +11,16 @@ import numpy as np
 from typing_extensions import Self
 
 from multiads import assembly
-from multiads.scenario.polars import POLAR_DEFAULT_SIZE, PolarVariable
 from multiads.scenario.span_loads import SPANLOAD_DEFAULT_NUM_STATIONS
 from multiads.solvers import SolverOptions
+from multiads.solvers.aerodynamics import SectionOptions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from numpy.typing import NDArray
+
+    from multiads.scenario.polars import PolarVariable
 
 
 def _log_cmd_output(
@@ -89,14 +91,18 @@ class Options(SolverOptions):
         work_dir: str | Path = ".",
         output_dir: str | Path = "output",
         post_dir: str | Path = "post",
+        keep_run_directory: bool = False,
         # Global postprocess options
         output_options: OutputOptions | None = None,
         # Solver options
         t_start: float = 0.0,
         t_end: float | None = None,
         dt: float | None = None,
+        dt_out: float | None = None,
+        output_start: bool = False,
         n_turns: float = 4,
         steps_per_turn: int = 40,
+        n_wake_panels: int = 1,
         n_wake_particles: int = 10000,
         particles_box_min: NDArray[np.float64] | None = None,
         particles_box_max: NDArray[np.float64] | None = None,
@@ -105,6 +111,7 @@ class Options(SolverOptions):
         box_length: float | None = None,
         n_box: NDArray[np.int32] | None = None,
         octree_origin: NDArray[np.float64] | None = None,
+        min_octree_divisions: int = 2,
         n_octree_levels: int = 6,
         min_octree_part: int = 7,
         multipole_degree: int = 2,
@@ -132,17 +139,22 @@ class Options(SolverOptions):
         self.work_dir = Path(work_dir)
         self.output_dir = Path(output_dir)
         self.post_dir = Path(post_dir)
+        self.keep_run_directory = keep_run_directory
 
         self.output_options = output_options or OutputOptions()
 
         self.t_start = t_start
         self.t_end = t_end
         self.dt = dt
+        self.dt_out = dt_out
+        self.output_start = output_start
         self.n_turns = n_turns
         self.steps_per_turn = steps_per_turn
+        self.n_wake_panels = n_wake_panels
         self.n_wake_particles = n_wake_particles
         self.penetration_avoidance = penetration_avoidance
         self.fmm = fmm
+        self.min_octree_divisions = min_octree_divisions
         self.n_octree_levels = n_octree_levels
         self.min_octree_part = min_octree_part
         self.multipole_degree = multipole_degree
@@ -160,6 +172,7 @@ class Options(SolverOptions):
             self.box_length, self.octree_origin, self.n_box = (
                 self._set_octree_parameters(
                     self.fmm,
+                    self.min_octree_divisions,
                     self.particles_box_min,
                     self.particles_box_max,
                 )
@@ -187,6 +200,7 @@ class Options(SolverOptions):
     def _set_octree_parameters(
         self,
         fmm: bool,
+        min_n: int,
         box_min: NDArray[np.float64],
         box_max: NDArray[np.float64],
     ) -> tuple[float, NDArray[np.float64], NDArray[np.int_]]:
@@ -201,31 +215,19 @@ class Options(SolverOptions):
         inds = np.argsort(dbox)
         dbox_sorted = dbox[inds]
 
-        # Find 'optimal' number of boxes (could be smarter)
-        n = (0, 0, 0)
-        box_length = 0.0
-        min_res = 10.0
-
-        # NOTE: Upper limit and octree margins are hardcoded!
-        max_n0 = 4
+        # Use at least `min_n` divisions in each axis
+        n = [min_n, 0, 0]
         octree_margins = 0.1
 
         def ceil_th(x: float, th: float) -> int:
             ix = int(x)
             return ix if (x % ix < th) else ix + 1
 
-        for n0 in range(1, max_n0 + 1):
-            dx0, dx1, dx2 = dbox_sorted
-            length = dx0 / n0
+        dx0, dx1, dx2 = dbox_sorted
+        box_length = dx0 / n[0]
 
-            n1 = ceil_th(dx1 / length, octree_margins)
-            n2 = ceil_th(dx2 / length, octree_margins)
-            res = max(n1 * length - dx1, n2 * length - dx2)
-
-            if res < min_res:
-                n = (n0, n1, n2)
-                box_length = length
-                min_res = res
+        n[1] = ceil_th(dx1 / box_length, octree_margins)
+        n[2] = ceil_th(dx2 / box_length, octree_margins)
 
         # Add margins if needed
         for ni, dxi in zip(n, dbox_sorted, strict=True):
@@ -302,16 +304,6 @@ class OutputOptions:
         self.viz_separate_wake = viz_separate_wake
         self.viz_avg = viz_avg
         self.viz_variables = [] if viz_variables is None else viz_variables
-
-
-class SectionOptions(assembly.ComponentOptions):
-    def __init__(
-        self,
-        polar: bool = False,
-        polar_length: int = POLAR_DEFAULT_SIZE,
-    ) -> None:
-        self.polar = polar
-        self.polar_length = polar_length
 
 
 class Section:
@@ -427,6 +419,101 @@ class Span:
             return int(max(1, np.ceil(length * density)))
         msg = f"No 'num_panels' nor 'panel_density' in {cls.__name__}'."
         raise ValueError(msg)
+        
+class MovableSurface:
+    def __init__(
+        self,
+        length: float,
+        pos_start: list[float],
+        pos_end: list[float],
+        ampl: float,
+        derivative: bool = False,
+        dDelta: float = 0.0,
+    ) -> None:
+        self.length = length
+        self.pos_start = pos_start
+        self.pos_end = pos_end
+        self.ampl = ampl
+        self.derivative = derivative
+        self.dDelta = dDelta
+
+
+    @classmethod
+    def from_component(cls, comp: assembly.MovableSurface) -> Self:
+        try:
+            return cls(
+                length=comp.length,
+                pos_start=comp.pos_start,
+                pos_end=comp.pos_end,
+                ampl=comp.ampl,
+                derivative=comp.derivative,
+                dDelta=comp.dDelta,
+            )
+
+        except StopIteration:
+            msg = f"No DUST options in component '{comp.name}'."
+            raise ValueError(msg) from None
+
+    def _write_hinge(
+        self,
+        out: list[str],
+        wing_name: str,
+        section_twist: float,
+    ) -> None:
+        lam = np.radians(self.sweep)
+        phi = np.radians(self.dihed)
+        x1, y1, z1 = self.pos
+
+        if y1 < 0:
+            lam = -lam
+            phi = -phi
+            y2 = y1 - self.length
+            x2 = x1 - self.length * (np.sin(lam) / np.cos(lam))
+            z2 = z1 - self.length * (np.sin(phi) / (np.cos(phi) * np.cos(lam)))
+        else:
+            y2 = y1 + self.length
+            x2 = x1 + self.length * (np.sin(lam) / np.cos(lam))
+            z2 = z1 + self.length * (np.sin(phi) / (np.cos(phi) * np.cos(lam)))
+
+        out.extend(
+            [
+                "hinge = {\n",
+                f"    hinge_tag = {wing_name}_movable_surface\n",
+                "    hinge_nodes_input = parametric\n",
+            ],
+        )
+
+        if y1 < 0:
+            out.extend(
+                [
+                    f"    node_2 = (/ {x1:.6f}, {y1:.6f}, {z1:.6f} /)\n",
+                    f"    node_1 = (/ {x2:.6f}, {y2:.6f}, {z2:.6f} /)\n",
+                ],
+            )
+        else:
+            out.extend(
+                [
+                    f"    node_1 = (/ {x1:.6f}, {y1:.6f}, {z1:.6f} /)\n",
+                    f"    node_2 = (/ {x2:.6f}, {y2:.6f}, {z2:.6f} /)\n",
+                ],
+            )
+
+        out.extend(
+            [
+                "    n_nodes = 2\n",
+                "    hinge_ref_dir = (/ 1.0, 0.0, 0.0 /)\n",
+                "    hinge_offset = 0.1\n",
+                "    hinge_spanwise_blending = 0.01\n",
+                "    hinge_adaptive_mesh = F\n",
+                "    hinge_rotation_input = function:const\n",
+                "    hinge_rotation_function = {\n",
+                f"    amplitude = {self.ampl:.6f}\n",
+                "    omega     = 0.0\n",
+                "    phase     = 0.0\n",
+                "    }\n",
+                "}\n",
+            ],
+        )
 
 
 class WingPanelType(Enum):
@@ -449,12 +536,14 @@ class WingOptions(assembly.ComponentOptions):
         panel_type: WingPanelType | None = None,
         num_panels: int = 0,
         mesh_file: Path | None = None,
+        inner_product_te: float | None = None,
         output_options: OutputOptions | None = None,
     ) -> None:
         self.method = discretization_method
         self.panel_type = panel_type
         self.num_panels = num_panels
         self.mesh_file = mesh_file
+        self.inner_product_te = inner_product_te
         self.output_opts = output_options or OutputOptions()
         self._check_args()
 
@@ -475,9 +564,10 @@ class Wing:
         name: str,
         sections: Sequence[Section],
         spans: Sequence[Span],
-        method: WingMethod,
-        panel_type: WingPanelType | None,
-        num_panels: int,
+        movable_surfaces: Sequence[MovableSurface] | None = None,
+        method: WingMethod | None = None,
+        panel_type: WingPanelType | None = None,
+        num_panels: int = 100.0,
         mesh_file: Path | None = None,
         pos: NDArray[np.float64] | None = None,
         offset: NDArray[np.float64] | None = None,
@@ -486,6 +576,7 @@ class Wing:
         beta: float = 0.0,
         roll: float = 0.0,
         xc_ref: float = 0.25,
+        inner_product_te: float | None = None,
         symmetry: bool = False,
         mirror: bool = False,
         options: OutputOptions | None = None,
@@ -493,6 +584,7 @@ class Wing:
         self.name = name
         self.sections = sections
         self.spans = spans
+        self.movable_surfaces = movable_surfaces
         self.method = method
         self.panel_type = panel_type
         self.num_panels = num_panels
@@ -502,6 +594,7 @@ class Wing:
         self.beta = beta
         self.roll = roll
         self.xc_ref = xc_ref
+        self.inner_product_te = inner_product_te
         self.symmetry = symmetry
         self.mirror = mirror
         self.options = options or OutputOptions()
@@ -515,11 +608,13 @@ class Wing:
             opts: WingOptions = next(o for o in comp.options if type(o) is WingOptions)
             sections = [Section.from_component(s) for s in comp.sections]
             spans = [Span.from_component(s) for s in comp.spans]
+            movable_surfaces = [MovableSurface.from_component(s) for s in comp.movable_surfaces]
 
             return cls(
                 name=comp.name,
                 sections=sections,
                 spans=spans,
+                movable_surfaces = movable_surfaces,
                 method=opts.method,
                 panel_type=opts.panel_type,
                 num_panels=opts.num_panels,
@@ -531,6 +626,7 @@ class Wing:
                 beta=comp.beta,
                 roll=comp.roll,
                 xc_ref=comp.xc_ref,
+                inner_product_te=opts.inner_product_te,
                 symmetry=comp.symmetry,
                 mirror=comp.mirror,
                 options=opts.output_opts,
@@ -549,6 +645,7 @@ class Wing:
         if opts := next((o for o in comp.options if type(o) is WingOptions), None):
             self.num_panels = opts.num_panels
             self.mesh_file = opts.mesh_file
+            self.inner_product_te = opts.inner_product_te
 
         self.pos = comp.global_pos
         self.offset = comp.offset
@@ -591,6 +688,8 @@ class Wing:
             "mirror_point = (/ {:.6f}, {:.6f}, {:.6f} /)\n".format(*self.offset),
             "mirror_normal = (/ 0.0, 0.0, 1.0 /)\n",
         ]
+        if self.inner_product_te is not None:
+            out += [f"inner_product_te = {self.inner_product_te:.6f}\n"]
 
         # Modify offsets when using lifting lines
         if self.method == WingMethod.LIFTING_LINE:
@@ -624,6 +723,12 @@ class Wing:
                 f"type_chord = {self.panel_type.value}\n",
             ]
 
+        # Handle non-linear VLM  # TODO @Andres: Set to False now
+        if self.method == WingMethod.VORTEX_LATTICE and any(
+            sec.polar for sec in self.sections
+        ):
+            out += ["airfoil_table_correction = F\n"]
+
         return out
 
     def _make_sections(self) -> Sequence[str]:
@@ -655,6 +760,7 @@ class Wing:
                 sweep = span.sweep
                 dihed = span.dihed
 
+            section = self.sections[i + 1]
             out += [
                 "\n",
                 f"span = {span_len:.6f}\n",
@@ -663,11 +769,11 @@ class Wing:
                 f"nelem_span = {span.num_panels}\n",
                 f"type_span = {span.panel_type.value}\n",
                 "\n",
-                f"chord = {self.sections[i + 1].chord:.6f}\n",
-                f"twist = {self.sections[i + 1].twist:.6f}\n",
-                f"airfoil = {self.sections[i + 1].airfoil}\n",
+                f"chord = {section.chord:.6f}\n",
+                f"twist = {section.twist:.6f}\n",
+                f"airfoil = {section.airfoil}\n",
             ]
-            if self.sections[i + 1].polar:
+            if section.polar:
                 out += [f"airfoil_table = {section.name}.c81\n"]
 
         return out
@@ -965,6 +1071,7 @@ class PostSpanwiseLoads(Post):
         resolution: int = SPANLOAD_DEFAULT_NUM_STATIONS,
         axis_nod: NDArray[np.float64] | None = None,
         axis_dir: NDArray[np.float64] | None = None,
+        symmetric_geo: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(**kwargs)
@@ -972,6 +1079,7 @@ class PostSpanwiseLoads(Post):
         self.resolution = resolution
         self.axis_nod = np.zeros(3) if axis_nod is None else axis_nod
         self.axis_dir = np.array([0.0, 1.0, 0.0]) if axis_dir is None else axis_dir
+        self.symmetric_geo = symmetric_geo
 
         self.y_cen: NDArray[np.float64]
         self.y_span: NDArray[np.float64]
@@ -1042,8 +1150,17 @@ class PostSpanwiseLoads(Post):
             y_span_0 = np.array([float(x) for x in f.readline().split()])
             chord_0 = np.array([float(x) for x in f.readline().split()])
 
-        y_cen = np.linspace(y_cen_0[0], y_cen_0[-1], self.resolution)
-        y_span = np.interp(y_cen, y_cen_0, y_span_0)
+            # If the geometry is symmetric, the ordering of the chords seems to be wrong
+            if self.symmetric_geo:
+                n2 = len(chord_0) // 2
+                chord_0 = np.concat((np.flip(chord_0[:n2]), chord_0[n2:]))
+
+        y_0 = y_cen_0[0] - y_span_0[0] * 0.5
+        y_1 = y_cen_0[-1] + y_span_0[-1] * 0.5
+        y_sec = np.linspace(y_0, y_1, self.resolution + 1)
+
+        y_cen = (y_sec[1:] + y_sec[:-1]) * 0.5
+        y_span = y_sec[1:] - y_sec[:-1]
         chord = np.interp(y_cen, y_cen_0, chord_0)
 
         return y_cen_0, y_cen, y_span, chord
@@ -1446,6 +1563,7 @@ class Driver:
             )
             raise ValueError(msg)
 
+        dt_out = dt if self.options.dt_out is None else self.options.dt_out
         fvec_temp = "(/ {:.6f}, {:.6f}, {:.6f} /)\n"
         ivec_temp = "(/ {}, {}, {} /)\n"
 
@@ -1464,14 +1582,16 @@ class Driver:
                     f"t_start = {self.options.t_start}\n",
                     f"tend = {tend:.6f}\n",
                     f"dt = {dt:.6e}\n",
-                    f"dt_out = {dt:.6e}\n",
-                    "output_start = F\n",
+                    f"dt_out = {dt_out:.6e}\n",
+                    "output_start = {}\n".format(
+                        "T" if self.options.output_start else "F",
+                    ),
                     "\n",
                     "geometry_file = geo_input.h5\n",
                     "\n",
                     "reference_file = references.in\n",
                     "\n",
-                    "n_wake_panels = 1\n",
+                    f"n_wake_panels = {self.options.n_wake_panels}\n",
                     f"n_wake_particles = {self.options.n_wake_particles}\n",
                     "particles_box_min = "
                     + fvec_temp.format(*self.options.particles_box_min),

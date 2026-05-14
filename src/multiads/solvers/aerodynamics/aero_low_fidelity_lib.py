@@ -1,60 +1,132 @@
+from __future__ import annotations
+
 from copy import deepcopy
-from dataclasses import dataclass, field
 from typing import Any
 
-import assembly
 import numpy as np
-from assembly import MADSComponent
 from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from typing_extensions import Self
 
+from multiads import assembly
+from multiads.assembly import MADSComponent
+from multiads.solvers import SolverOptions
 
 def _aero_lf_options(comp: MADSComponent) -> dict[str, Any]:
     options = {}
-    if hasattr(comp, "options"):
+    if hasattr(comp, "options") and isinstance(comp.options, dict):
         options = comp.options.get("aero_lf", {})
     return deepcopy(options)
 
 
-@dataclass
+def _buildup_drag_options(comp: MADSComponent) -> dict[str, Any]:
+    options = {}
+    if hasattr(comp, "options") and isinstance(comp.options, dict):
+        options = comp.options.get("component_buildup_drag", {})
+    return deepcopy(options)
+
+
+def calculate_cutoff_reynolds_number(
+    mach: float, characteristic_length: float, surface_material: str
+) -> float:
+    if surface_material == "camouflage_paint_on_aluminum":
+        roughness = 10.15e-6
+    elif surface_material == "smooth_paint":
+        roughness = 6.34e-6
+    elif surface_material == "production_sheet_metal":
+        roughness = 4.05e-6
+    elif surface_material == "polished_sheet_metal":
+        roughness = 1.52e-6
+    elif surface_material == "smooth_molded_composite":
+        roughness = 0.52e-6
+    else:
+        raise ValueError(
+            "Each provided component must have be an 'options' field for this solver, with a valid input for 'surface_material'.",
+        )
+
+    if mach < 0.8:
+        re_cutoff = 38.21 * (characteristic_length / roughness) ** 1.053
+    else:
+        re_cutoff = 44.62 * (characteristic_length / roughness) ** 1.053 * mach**1.16
+
+    return re_cutoff
+
+
+def calculate_friction_coefficient(
+    reynolds_number: float, reynolds_cutoff: float, mach: float
+) -> tuple[float, float]:
+    if reynolds_number < reynolds_cutoff:
+        c_f_turb = 0.455 / (
+            np.log10(reynolds_number) ** 2.58 * (1 + 0.144 * mach**2) ** 0.65
+        )
+        c_f_laminar = 1.328 / np.sqrt(reynolds_number)
+    else:
+        c_f_turb = 0.455 / (
+            np.log10(reynolds_cutoff) ** 2.58 * (1 + 0.144 * mach**2) ** 0.65
+        )
+        c_f_laminar = 1.328 / np.sqrt(reynolds_cutoff)
+
+    return c_f_turb, c_f_laminar
+
+
+def cosd(deg: float) -> float:
+    return np.cos(np.radians(deg))
+
+class Options(SolverOptions):
+    def __init__(
+        self,
+        *,
+        wing_name_serving_for_reference_area: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.wing_name_serving_for_reference_area = wing_name_serving_for_reference_area
+
 class Section:
-    chord: float
-    twist: float
-    camber_distribution: NDArray[np.float64]  # camber distribution [x,y]
-    camber_to_chord_ratio: float
-    thickness_to_chord_ratio: float
-    rel_chord_position_max_camber: float
-    alpha0_rad: float = 0.0  # zero lift angle of attack [rad]
+    def __init__(
+        self,
+        chord: float,
+        twist: float,
+        camber_distribution: NDArray[np.float64],
+        camber_to_chord_ratio: float,
+        thickness_to_chord_ratio: float,
+        rel_chord_position_max_camber: float,
+        alpha0_rad: float = 0.0,
+    ) -> None:
+        self.chord = chord
+        self.twist = twist
+        self.camber_distribution = camber_distribution
+        self.camber_to_chord_ratio = camber_to_chord_ratio
+        self.thickness_to_chord_ratio = thickness_to_chord_ratio
+        self.rel_chord_position_max_camber = rel_chord_position_max_camber
+        self.alpha0_rad = alpha0_rad
 
     @classmethod
     def from_component(cls, comp: assembly.Section) -> Self:
-        return Section(
+        return cls(
             chord=comp.chord,
             twist=comp.twist,
             camber_distribution=comp.camber_distribution,
             camber_to_chord_ratio=comp.camber_to_chord_ratio,
             thickness_to_chord_ratio=comp.thickness_to_chord_ratio,
             rel_chord_position_max_camber=comp.rel_chord_position_max_camber,
-            alpha0_rad=0.0,  # Initialize alpha0_rad to 0.0
+            alpha0_rad=0.0,
         )
 
 
-@dataclass
 class Span:
-    length: float  # length of the span [m]
-    n_elem: int
-    elem_type: str = "uniform"
+    TYPES = ["uniform"]
 
-    TYPES = [
-        "uniform",
-        # "cosine", # not considered yet
-        # "cosineIB", # not considered yet
-        # "cosineOB", # not considered yet
-        # "equalarea", # not considered yet
-    ]
+    def __init__(
+        self,
+        length: float,
+        n_elem: int,
+        elem_type: str = "uniform",
+    ) -> None:
+        self.length = length
+        self.n_elem = n_elem
+        self.elem_type = elem_type
 
-    def __post_init__(self) -> None:
         if self.elem_type.strip() not in Span.TYPES:
             raise ValueError(
                 f"Span-wise distribution of elements '{self.elem_type.strip()}' unkown",
@@ -66,62 +138,206 @@ class Span:
         if density := opts.pop("panelDensity", None):
             opts["n_elem"] = int(max(1, np.ceil(comp.length * density)))
 
-        return Span(comp.length, **opts)
-
-
-@dataclass
-class Wing:
-    alpha: float  # angle of attack [deg]
-    mac: float  # mean aerodynamic chord [m]
-    ar: float  # aspect ratio [-]
-    area: float  # wing area [m^2] # TODO @Tim: how does this work if area itself is not a variable, but depends on variables (e.g. span), -->test if automatic update works correctly! Maybe all attributes of the wing need to be included in the "required variables" list?
-    phi_50: float  # sweep at 50% of the chord [deg]
-    cd0: float = 0.0  # cd_0 polar parameter [-]
-    oswald_factor: float = None
-    k2: float = 1.0  # k2 polar parameter [-]
-    k_polhamus: float = 1.0  # airfoil/pressure impact [-] # TODO @Tim: ???
-    sections: list[Section] = field(default_factory=list)
-    spans: list[Span] = field(default_factory=list)
-    symmetry: bool = False
-
-    @classmethod
-    def from_component(cls, comp: assembly.Wing) -> Self:
-        opts = _aero_lf_options(comp)
-        sections = [Section.from_component(s) for s in comp.sections]
-        spans = [Span.from_component(s) for s in comp.spans]
-        
-        return Wing(
-            alpha=comp.alpha,
-            mac=comp.mac,
-            ar=comp.aspect_ratio,
-            area=comp.area,
-            # phi_50=comp.sweep_at_chord_station(0.5),
-            # cd0=comp.cd0,
-            sections=sections,
-            spans=spans,
-            symmetry=comp.symmetry,
-            **opts,
+        return cls(
+            length=comp.length,
+            n_elem=opts.get("n_elem", 1),
+            elem_type=opts.get("elem_type", "uniform"),
         )
 
 
-@dataclass
-class aero_lf_options:
-    pass
+class WingOptions(assembly.ComponentOptions):
+    def __init__(
+        self,
+        alpha: float = 2.0,
+        mac: float = 0.4,
+        ar: float = 15.0,
+        area: float = 20.0,
+        phi_50: float = 1.0,
+        cd0: float = 0.0,
+        oswald_factor: float | None = None,
+        k2: float = 1.0,
+        k_polhamus: float = 1.0,
+        sections: list[Section] | None = None,
+        spans: list[Span] | None = None,
+        symmetry: bool = False,
+    ) -> None:
+        self.alpha = alpha
+        self.mac = mac
+        self.ar = ar
+        self.area = area
+        self.phi_50 = phi_50
+        self.cd0 = cd0
+        self.oswald_factor = oswald_factor
+        self.k2 = k2
+        self.k_polhamus = k_polhamus
+        self.sections = sections if sections is not None else []
+        self.spans = spans if spans is not None else []
+        self.symmetry = symmetry
+
+class Wing:
+    def __init__(
+        self,
+        alpha: float = 2.0,
+        mac: float = 1.0,
+        ar: float = 15.0,
+        area: float = 20.0,
+        phi_50: float = 1.0,
+        cd0: float = 0.0,
+        oswald_factor: float | None = None,
+        k2: float = 1.0,
+        k_polhamus: float = 1.0,
+        sections: list[Section] | None = None,
+        spans: list[Span] | None = None,
+        symmetry: bool = False,
+    ) -> None:
+        self.alpha = alpha
+        self.mac = mac
+        self.ar = ar
+        self.area = area
+        self.phi_50 = phi_50
+        self.cd0 = cd0
+        self.oswald_factor = oswald_factor
+        self.k2 = k2
+        self.k_polhamus = k_polhamus
+        self.sections = sections if sections is not None else []
+        self.spans = spans if spans is not None else []
+        self.symmetry = symmetry
+
+    @classmethod
+    def from_component(cls, comp: assembly.Wing) -> Self:
+        comp_opts = _aero_lf_options(comp)
+        sections = [Section.from_component(s) for s in comp.sections]
+        spans = [Span.from_component(s) for s in comp.spans]
+
+        try:
+            area = comp.area
+        except:
+            if opts := next((o for o in comp.options if type(o) is WingOptions), None):
+                area = opts.area
+        
+        try:
+            mac = comp.mac
+        except:
+            if opts := next((o for o in comp.options if type(o) is WingOptions), None):
+                mac = opts.mac
+        
+        try:
+            ar = comp.aspect_ratio
+        except:
+            if opts := next((o for o in comp.options if type(o) is WingOptions), None):
+                ar = opts.ar
+
+        try:
+            phi_50 = (
+                comp.sweep_at_chord_station(0.5)
+                if hasattr(comp, "sweep_at_chord_station")
+                else 0.0
+            )
+        except (IndexError, AttributeError):
+            if opts := next((o for o in comp.options if type(o) is WingOptions), None):
+                phi_50 = opts.phi_50
+
+        return cls(
+            alpha=comp.alpha,
+            mac=mac,
+            ar=ar,
+            area=area,
+            phi_50=phi_50,
+            sections=sections,
+            spans=spans,
+            symmetry=comp.symmetry,
+        )
+
+
+class Fuselage:
+    def __init__(
+        self,
+        name: str,
+        wetted_area: float,
+        maximum_width: float,
+        maximum_height: float,
+        length: float,
+        portion_laminar_flow: float = 0.0,
+        surface_material: str = "smooth_paint",
+    ) -> None:
+        self.name = name
+        self.wetted_area = wetted_area
+        self.maximum_width = maximum_width
+        self.maximum_height = maximum_height
+        self.length = length
+        self.portion_laminar_flow = portion_laminar_flow
+        self.surface_material = surface_material
+
+    @classmethod
+    def from_component(cls, comp: assembly.Fuselage) -> Self:
+        opts = _buildup_drag_options(comp)
+        fuselage = cls(
+            name=comp.name,
+            wetted_area=comp.wetted_area,
+            maximum_width=comp.maximum_width,
+            maximum_height=comp.maximum_height,
+            length=comp.length,
+            portion_laminar_flow=getattr(comp, "portion_laminar_flow", 0.0),
+        )
+        for k, v in opts.items():
+            if k in ["surface_material"]:
+                setattr(fuselage, k, v)
+        return fuselage
+
+
+class Nacelle:
+    def __init__(
+        self,
+        name: str,
+        wetted_area: float,
+        maximum_width: float,
+        maximum_height: float,
+        length: float,
+        portion_laminar_flow: float = 0.0,
+        surface_material: str = "smooth_paint",
+    ) -> None:
+        self.name = name
+        self.wetted_area = wetted_area
+        self.maximum_width = maximum_width
+        self.maximum_height = maximum_height
+        self.length = length
+        self.portion_laminar_flow = portion_laminar_flow
+        self.surface_material = surface_material
+
+    @classmethod
+    def from_component(cls, comp: assembly.Nacelle) -> Self:
+        opts = _buildup_drag_options(comp)
+        nacelle = cls(
+            name=comp.name,
+            wetted_area=comp.wetted_area,
+            maximum_width=comp.maximum_width,
+            maximum_height=comp.maximum_height,
+            length=comp.length,
+            portion_laminar_flow=getattr(comp, "portion_laminar_flow", 0.0),
+        )
+        for k, v in opts.items():
+            if k in ["surface_material"]:
+                setattr(nacelle, k, v)
+        return nacelle
 
 
 class Driver:
     def __init__(
         self,
-        environment: assembly.Environment = field(default_factory=assembly.Environment),
-        wings: list[Wing] = field(default_factory=list),
-        options: aero_lf_options = field(default_factory=aero_lf_options),
+        environment: assembly.Environment,
+        wings: list[assembly.Wing],
+        fuselages: list[assembly.Fuselage] | None = None,
+        nacelles: list[assembly.Nacelle] | None = None,
+        options: Options | None = None,
     ) -> None:
         self.environment = environment
-        self.options = options
+        self.options = options or Options()
         self.density = environment.density
         self.soundSpeed = environment.sound_speed
         self.viscosity = environment.dyn_viscosity
         self.velocity = environment.speed
+        self.mach = environment.mach
+
         self.mapind = {w.name: i for i, w in enumerate(wings)}
         self.Cl = [0.0 for _ in wings]
         self.Cd = [0.0 for _ in wings]
@@ -130,11 +346,44 @@ class Driver:
         for w in self.wings:
             w.alpha += environment.alpha
 
+        self.fuselages: list[Fuselage] = []
+        if fuselages:
+            self.fuselages = [Fuselage.from_component(f) for f in fuselages]
+
+        self.nacelles: list[Nacelle] = []
+        if nacelles:
+            self.nacelles = [Nacelle.from_component(n) for n in nacelles]
+
+        self.wing_cd0: list[float] = [0.0 for _ in wings]
+        self.fuselage_cd0: list[float] = (
+            [0.0 for _ in self.fuselages] if self.fuselages else []
+        )
+        self.nacelle_cd0: list[float] = (
+            [0.0 for _ in self.nacelles] if self.nacelles else []
+        )
+
+        self.reference_area: float | None = None
+
     def run(self) -> None:
+        if not self.wings:
+            raise ValueError("At least one wing must be provided!")
+
+        if self.options.wing_name_serving_for_reference_area:
+            for wing in self.wings:
+                if (
+                    getattr(wing, "name", None)
+                    == self.options.wing_name_serving_for_reference_area
+                ):
+                    self.reference_area = getattr(wing, "area", 0.0)
+                    break
+        else:
+            self.reference_area = (
+                getattr(self.wings[0], "area", 0.0) if self.wings else 0.0
+            )
+
         for i, wing in enumerate(self.wings):
-            cl, cd = self._run(
+            cl, cd = self._run_wing(
                 wing,
-                self.options,
                 self.density,
                 self.velocity,
                 self.viscosity,
@@ -143,120 +392,109 @@ class Driver:
             self.Cl[i] = cl
             self.Cd[i] = cd
 
-    @staticmethod
-    def _run(
+            wing_cd0 = self._compute_wing_cd0(wing)
+            self.wing_cd0[i] = wing_cd0
+
+        for i, fuselage in enumerate(self.fuselages):
+            self.fuselage_cd0[i] = self._compute_fuselage_cd0(fuselage)
+
+        for i, nacelle in enumerate(self.nacelles):
+            self.nacelle_cd0[i] = self._compute_nacelle_cd0(nacelle)
+
+    def _run_wing(
+        self,
         wing: Wing,
-        options: aero_lf_options,
         density: float,
         velocity: float,
         viscosity: float,
         soundSpeed: float,
     ) -> tuple[float, float]:
-        # recover derived geometrical parameters
-        mean_chord = wing.mac
-        aspect_ratio = wing.ar
+        mean_chord = wing.mac if wing.mac else 1.0
+        aspect_ratio = wing.ar if wing.ar else 1.0
+        cd0 = getattr(wing, "cd0", 0.0)
+        k1 = getattr(wing, "k1", 1.0)
 
-        ### estimate zero lift angle of attack based on thin airfoil theory for each Section ###
+        if len(wing.sections) < 2 or not wing.spans:
+            alpha = wing.alpha
+            alpha_0 = 0.0
+            phi_50 = wing.phi_50
 
-        # initialise
+            cL_alpha = (2.0 * np.pi * aspect_ratio) / (
+                2.0 + np.sqrt(((aspect_ratio**2) * (1.0 + (np.tan(phi_50) ** 2)) + 4.0))
+            )
+
+            Cl = cL_alpha * (alpha - alpha_0)
+            Cd = cd0 + k1 * Cl**2
+
+            return Cl, Cd
+
         sum_all_areas = 0.0
         sum_all_alpha0_rad_span_weighted = 0.0
         sum_all_twist_rad_span_weighted = 0.0
 
         for i, span in enumerate(wing.spans):
-            # calculate area, taper ratio, and reference chord (MAC) of each span
             chord_section_inner = wing.sections[i].chord
             chord_section_outer = wing.sections[i + 1].chord
-            twist_section_inner = wing.sections[
-                i
-            ].twist  # twist of the section in [deg]
-            twist_section_outer = wing.sections[
-                i + 1
-            ].twist  # twist of the section in [deg]
+            twist_section_inner = wing.sections[i].twist
+            twist_section_outer = wing.sections[i + 1].twist
 
             area_span = 0.5 * span.length * (chord_section_inner + chord_section_outer)
 
-            # Split camber line into x and y coordinates
             x_camber_inner = wing.sections[i].camber_distribution[:, 0]
             y_camber_inner = wing.sections[i].camber_distribution[:, 1]
             x_camber_outer = wing.sections[i + 1].camber_distribution[:, 0]
             y_camber_outer = wing.sections[i + 1].camber_distribution[:, 1]
 
-            # Interpolate camber line to theta-based x grid
-            ################# inner section
             n = 1000
             theta_inner = np.linspace(0, np.pi, n)
-            x_theta_inner = 0.5 * (1 - np.cos(theta_inner))  # mapping x = (1 - cosθ)/2
+            x_theta_inner = 0.5 * (1 - np.cos(theta_inner))
 
-            # Interpolate camber to x_theta grid
             interp_camber = interp1d(
                 x_camber_inner, y_camber_inner, kind="cubic", fill_value="extrapolate"
             )
             z_inner = interp_camber(x_theta_inner)
 
-            # Compute dz/dx
             dzdx_inner = np.gradient(z_inner, x_theta_inner)
 
-            # Apply thin airfoil theory integral
             integrand_inner = dzdx_inner * np.cos(theta_inner)
-            alpha0_rad_inner = -1 / np.pi * np.trapz(integrand_inner, theta_inner)
+            alpha0_rad_inner = -1 / np.pi * np.trapezoid(integrand_inner, theta_inner)
 
-            ################# outer section
-            n = 1000
             theta_outer = np.linspace(0, np.pi, n)
-            x_theta_outer = 0.5 * (1 - np.cos(theta_outer))  # mapping x = (1 - cosθ)/2
+            x_theta_outer = 0.5 * (1 - np.cos(theta_outer))
 
-            # Interpolate camber to x_theta grid
             interp_camber = interp1d(
                 x_camber_outer, y_camber_outer, kind="cubic", fill_value="extrapolate"
             )
             z_outer = interp_camber(x_theta_outer)
 
-            # Compute dz/dx
             dzdx_outer = np.gradient(z_outer, x_theta_outer)
 
-            # Apply thin airfoil theory integral
             integrand_outer = dzdx_outer * np.cos(theta_outer)
-            alpha0_rad_outer = -1 / np.pi * np.trapz(integrand_outer, theta_outer)
+            alpha0_rad_outer = -1 / np.pi * np.trapezoid(integrand_outer, theta_outer)
 
-            # calculate mean alpha0 of the span
             alpha0_rad_span = (alpha0_rad_outer + alpha0_rad_inner) / 2
 
-            # calculate mean twist angle of the span
             twist_rad_span = (
                 np.radians(twist_section_outer) + np.radians(twist_section_inner)
             ) / 2
 
-            # compute area weighted sum of the alpha0_rad_span
             sum_all_alpha0_rad_span_weighted += alpha0_rad_span * area_span
-
-            # compute area weighted sum of the twist angles
             sum_all_twist_rad_span_weighted += twist_rad_span * area_span
-
-            # compute total area
             sum_all_areas += area_span
 
-            # Update alpha0_rad for the inner and outer sections
             wing.sections[i].alpha0_rad = alpha0_rad_inner
             wing.sections[i + 1].alpha0_rad = alpha0_rad_outer
 
-        # compute area weighted alpha0_rad for the entire wing
         alpha0_rad_weighted = sum_all_alpha0_rad_span_weighted / sum_all_areas
-
-        # compute area weighted twist_rad_ for the entire wing
         twist_rad_weighted = sum_all_twist_rad_span_weighted / sum_all_areas
 
-        # Reynolds number # ! review reference lenght scale
         reynolds_number = density * velocity * mean_chord / viscosity
 
-        # Compressibility factor
         beta = np.sqrt(1.0 - (velocity / soundSpeed) ** 2)
 
-        # degrees to radians
         alpha = np.radians(wing.alpha)
         phi_50 = np.radians(wing.phi_50)
 
-        # compute dCl/dalpha
         cL_alpha = (2.0 * np.pi * aspect_ratio) / (
             2.0
             + np.sqrt(
@@ -266,18 +504,16 @@ class Driver:
             )
         )
 
-        ###### RE-Number is out of the region for which the correction factor formulas are valid!!!
-        # compute correction factors
-        # factor_cL_alpha, factor_alpha_zero_lift, factor_k1, factor_k2 = self._correction_factors(reynolds_number, aspect_ratio)
-        factor_cd0 = 1.0  # no correction if value is 1
-        factor_cL_alpha = 1.0  # no correction if value is 1
-        factor_alpha_zero_lift = 1.0  # no correction if value is 1
-        factor_mean_twist = 1.0  # no correction if value is 1
-        factor_k1 = 1.0  # no correction if value is 1
-        factor_k2 = 1.0  # no correction if value is 1
-        k1 = 1 / (np.pi * wing.ar * wing.oswald_factor)
+        factor_cd0 = 1.0
+        factor_cL_alpha = 1.0
+        factor_alpha_zero_lift = 1.0
+        factor_mean_twist = 1.0
+        factor_k1 = 1.0
+        factor_k2 = 1.0
 
-        # lift and drag coefficients
+        oswald = wing.oswald_factor if wing.oswald_factor else 0.8
+        k1 = 1 / (np.pi * wing.ar * oswald)
+
         Cl = (
             factor_cL_alpha
             * cL_alpha
@@ -287,13 +523,104 @@ class Driver:
                 - alpha0_rad_weighted * factor_alpha_zero_lift
             )
         )
-        Cd = wing.cd0 * factor_cd0 + factor_k1 * k1 * Cl**2 + (factor_k2 - wing.k2) * Cl
 
-        return Cl, Cd
+        cd_polar = (
+            wing.cd0 * factor_cd0 + factor_k1 * k1 * Cl**2 + (factor_k2 - wing.k2) * Cl
+        )
+
+        return Cl, cd_polar
+
+    def _compute_wing_cd0(self, wing: Wing) -> float:
+        if self.reference_area is None:
+            return 0.0
+
+        re = self.density * self.velocity * wing.mac / self.viscosity
+
+        re_cutoff = calculate_cutoff_reynolds_number(
+            mach=self.mach,
+            characteristic_length=wing.mac,
+            surface_material="smooth_paint",
+        )
+
+        c_f_turb, c_f_laminar = calculate_friction_coefficient(re, re_cutoff, self.mach)
+
+        portion_laminar = getattr(wing, "portion_laminar_flow", 0.0)
+        c_f_weighted = portion_laminar * c_f_laminar + (1 - portion_laminar) * c_f_turb
+
+        rel_chord_max_thick = getattr(wing, "rel_chord_position_max_thickness", 0.35)
+        thick_to_chord = getattr(wing, "thickness_to_chord_ratio", 0.12)
+        sweep_at_max_thick = getattr(wing, "sweep_at_max_thickness_line", 0.0)
+
+        ff = (
+            1 + 0.6 / rel_chord_max_thick * thick_to_chord + 100 * thick_to_chord**4
+        ) * (1.34 * self.mach**0.18 * cosd(sweep_at_max_thick) ** 0.28)
+
+        wetted_area = getattr(wing, "wetted_area", wing.area * 2)
+        return c_f_weighted * ff * wetted_area / self.reference_area
+
+    def _compute_fuselage_cd0(self, fuselage: Fuselage) -> float:
+        if self.reference_area is None:
+            return 0.0
+
+        re = self.density * self.velocity * fuselage.length / self.viscosity
+
+        re_cutoff = calculate_cutoff_reynolds_number(
+            mach=self.mach,
+            characteristic_length=fuselage.length,
+            surface_material=fuselage.surface_material,
+        )
+
+        c_f_turb, c_f_laminar = calculate_friction_coefficient(re, re_cutoff, self.mach)
+
+        c_f_weighted = (
+            fuselage.portion_laminar_flow * c_f_laminar
+            + (1 - fuselage.portion_laminar_flow) * c_f_turb
+        )
+
+        if fuselage.maximum_height > fuselage.maximum_width:
+            fineness = fuselage.length / fuselage.maximum_height
+        else:
+            fineness = fuselage.length / fuselage.maximum_width
+
+        ff = 1 + 60 / fineness**3 + fineness / 400
+
+        return c_f_weighted * ff * fuselage.wetted_area / self.reference_area
+
+    def _compute_nacelle_cd0(self, nacelle: Nacelle) -> float:
+        if self.reference_area is None:
+            return 0.0
+
+        re = self.density * self.velocity * nacelle.length / self.viscosity
+
+        re_cutoff = calculate_cutoff_reynolds_number(
+            mach=self.mach,
+            characteristic_length=nacelle.length,
+            surface_material=nacelle.surface_material,
+        )
+
+        c_f_turb, c_f_laminar = calculate_friction_coefficient(re, re_cutoff, self.mach)
+
+        c_f_weighted = (
+            nacelle.portion_laminar_flow * c_f_laminar
+            + (1 - nacelle.portion_laminar_flow) * c_f_turb
+        )
+
+        if nacelle.maximum_height > nacelle.maximum_width:
+            fineness = nacelle.length / nacelle.maximum_height
+        else:
+            fineness = nacelle.length / nacelle.maximum_width
+
+        ff = 1 + (0.35 / fineness)
+
+        return c_f_weighted * ff * nacelle.wetted_area / self.reference_area
+
+    @property
+    def total_cd0(self) -> float:
+        return sum(self.wing_cd0) + sum(self.fuselage_cd0) + sum(self.nacelle_cd0)
 
     def coefficients(self, wing_names: list[str]) -> tuple[float, float]:
         if not wing_names:
-            wing_names = self.mapind.keys()
+            wing_names = list(self.mapind.keys())
 
         cl, cd = 0.0, 0.0
         for name in wing_names:
@@ -308,7 +635,7 @@ class Driver:
 
     def forces(self, wing_names: list[str]) -> tuple[float, float]:
         if not wing_names:
-            wing_names = self.mapind.keys()
+            wing_names = list(self.mapind.keys())
 
         q = 0.5 * self.density * self.velocity**2
         l, d = 0.0, 0.0
@@ -322,12 +649,61 @@ class Driver:
 
         return q * l, q * d
 
-    def moments(self, wing_names: list[str]) -> tuple[float, float, float]:
-        # thickness correction factor: [0.05 - 0.1]
-        thick_corr_fac = 0.05
+    def lift(self, wing_names: list[str] | None = None) -> float:
+        if wing_names is None:
+            wing_names = list(self.mapind.keys())
 
-        if not wing_names:
-            wing_names = self.mapind.keys()
+        q = 0.5 * self.density * self.velocity**2
+        total_lift = 0.0
+
+        for name in wing_names:
+            try:
+                i = self.mapind[name]
+                cl = self.Cl[i]
+                total_lift += q * self.wings[i].area * cl
+            except KeyError:
+                pass
+
+        return total_lift
+
+    def drag(self, wing_names: list[str] | None = None) -> float:
+        if wing_names is None:
+            wing_names = list(self.mapind.keys())
+
+        q = 0.5 * self.density * self.velocity**2
+        total_drag = 0.0
+        cd0 = self.total_cd0
+
+        for name in wing_names:
+            try:
+                i = self.mapind[name]
+                cl = self.Cl[i]
+                cd_coefficient = self.Cd[i]
+                ar = self.wings[i].ar or 1.0
+                oswald = self.wings[i].oswald_factor or 0.8
+                k1 = 1 / (np.pi * ar * oswald)
+                k2 = getattr(self.wings[i], "k2", 1.0)
+                cd_total = cd0 + k1 * cl**2 + (k2 - 1.0) * cl
+                total_drag += q * self.wings[i].area * cd_total
+            except KeyError:
+                pass
+
+        return total_drag
+
+    def efficiency(self, wing_names: list[str] | None = None) -> float:
+        l = self.lift(wing_names)
+        d = self.drag(wing_names)
+        if d == 0:
+            return 0.0
+        return l / d
+
+    def moments(
+        self, wing_names: list[str] | None = None
+    ) -> tuple[float, float, float]:
+        if wing_names is None:
+            wing_names = list(self.mapind.keys())
+
+        thick_corr_fac = 0.05
 
         q = 0.5 * self.density * self.velocity**2
         m_y = 0.0
@@ -335,21 +711,16 @@ class Driver:
             try:
                 i = self.mapind[name]
 
-                ### estimate pitching moment coefficient for each Section ###
-
-                # initialise
                 sum_all_areas = 0.0
                 sum_all_cm_y_span_weighted = 0.0
 
                 for k, span in enumerate(self.wings[i].spans):
-                    # calculate area, taper ratio, and reference chord (MAC) of each span
                     chord_section_inner = self.wings[i].sections[k].chord
                     chord_section_outer = self.wings[i].sections[k + 1].chord
                     area_span = (
                         0.5 * span.length * (chord_section_inner + chord_section_outer)
                     )
 
-                    # inner airfoil geometric characteristics
                     camber_to_chord_ratio_in = (
                         self.wings[i].sections[k].camber_to_chord_ratio
                     )
@@ -360,7 +731,6 @@ class Driver:
                         self.wings[i].sections[k].rel_chord_position_max_camber
                     )
 
-                    # outer airfoil geometric characteristics
                     camber_to_chord_ratio_out = (
                         self.wings[i].sections[k + 1].camber_to_chord_ratio
                     )
@@ -371,7 +741,6 @@ class Driver:
                         self.wings[i].sections[k + 1].rel_chord_position_max_camber
                     )
 
-                    # estimate cm_y at 1/4 line of inner section
                     cm_y_inner = (
                         -np.pi
                         / 2
@@ -380,7 +749,6 @@ class Driver:
                         - thick_corr_fac * thickness_to_chord_ratio_in
                     )
 
-                    # estimate cm_y at 1/4 line of outer section
                     cm_y_outer = (
                         -np.pi
                         / 2
@@ -389,106 +757,66 @@ class Driver:
                         - thick_corr_fac * thickness_to_chord_ratio_out
                     )
 
-                    # calculate mean cm_y_span of the span
                     cm_y_span = (cm_y_outer + cm_y_inner) / 2
 
-                    # compute area weighted sum of the cm_y_span
                     sum_all_cm_y_span_weighted += cm_y_span * area_span
-
-                    # compute total area
                     sum_all_areas += area_span
 
-                # compute area weighted cm_y for the entire wing
                 cm_y_weighted = sum_all_cm_y_span_weighted / sum_all_areas
-
-                # averaged pitching moment
-                m_y = cm_y_weighted * q * self.wings[i].area * self.wings[i].mac
+                m_y += cm_y_weighted * q * self.wings[i].area * self.wings[i].mac
 
             except KeyError:
                 pass
 
         return 0.0, m_y, 0.0
 
-    def spanloads(self, wing_names: list[str]) -> list[list[float]]:
-        if not wing_names:
-            wing_names = self.mapind.keys()
+    def moment_y(self, wing_names: list[str] | None = None) -> float:
+        _, my, _ = self.moments(wing_names)
+        return my
+
+    def spanloads(self, wing_names: list[str] | None = None) -> list[list[float]]:
+        if wing_names is None:
+            wing_names = list(self.mapind.keys())
+
+        y_cen = np.array([])
+        y_span = np.array([])
+        fx = np.array([])
+        fy = np.array([])
+        fz = np.array([])
+        mo = np.array([])
 
         for name in wing_names:
             try:
                 i = self.mapind[name]
 
-                # initialize wing_total_span
                 wing_accumlated_half_span = 0.0
-                y_cen = np.array([])  # initialize y_cen as NumPy array
-                y_span = np.array([])  # initialize y_span as NumPy array
-                fz = np.array([])  # initialize fz (--> spanwise lift) as NumPy array
-                fx = np.array([])  # initialize fz (--> spanwise drag) as NumPy array
-                chord = np.array([])  # initialize local chord as NumPy array
-                twist_rad = np.array(
-                    []
-                )  # initialize local twist angle in [rad] as NumPy array
-                alpha0_rad = np.array(
-                    []
-                )  # initialize local zero lift angle of attack in [rad]as NumPy array
 
                 for k, span in enumerate(self.wings[i].spans):
-                    # length of the elements (as in DUST) in this span
                     element_length = span.length / span.n_elem
 
-                    # y coordinates of centers of the elements (as in DUST; projected y position)
                     y_cen = np.append(
                         y_cen,
                         wing_accumlated_half_span
                         + (np.arange(span.n_elem) + 0.5) * element_length,
                     )
 
-                    # create an array containing the element_length for each element in this span (uniform element length)
                     y_span = np.append(y_span, np.full(span.n_elem, element_length))
 
-                    # create an array containing the local chord (linear interpolation)
                     chord_section_inner = self.wings[i].sections[k].chord
                     chord_section_outer = self.wings[i].sections[k + 1].chord
-                    chord = np.append(
-                        chord,
-                        np.linspace(
-                            chord_section_inner, chord_section_outer, span.n_elem
-                        ),
-                    )
 
-                    # create an array containing the local twist angle (linear interpolation)
                     twist_section_inner = self.wings[i].sections[k].twist
                     twist_section_outer = self.wings[i].sections[k + 1].twist
-                    twist_rad = np.append(
-                        twist_rad,
-                        np.linspace(
-                            np.radians(twist_section_inner),
-                            np.radians(twist_section_outer),
-                            span.n_elem,
-                        ),
-                    )
 
-                    # create an array containing the local zero lift angle (linear interpolation)
                     alpha0_rad_section_inner = self.wings[i].sections[k].alpha0_rad
                     alpha0_rad_section_outer = self.wings[i].sections[k + 1].alpha0_rad
-                    alpha0_rad = np.append(
-                        alpha0_rad,
-                        np.linspace(
-                            alpha0_rad_section_inner,
-                            alpha0_rad_section_outer,
-                            span.n_elem,
-                        ),
-                    )
 
-                    # sum up currently accumulated wing span
                     wing_accumlated_half_span += span.length
 
-                # get integral lift and drag of this wing
                 lift, drag = self.forces([name])
 
-                # get integral moments of this wing
                 _, m_y, _ = self.moments([name])
 
-                # compute elliptical lift distribution
                 spanwise_lift_half_wing = (
                     4
                     * lift
@@ -496,91 +824,28 @@ class Driver:
                     * np.sqrt(1 - (2 * y_cen / (2 * wing_accumlated_half_span)) ** 2)
                 )
 
-                # add global AoA of the wing to the twist distribution
-                aoa_wing_total = twist_rad + np.radians(self.wings[i].alpha)
-
-                # generate an array with effective angles of attack at each spanwise location
-                # (subtract zero-lift angle of attack from total AoA)
-                aoa_eff = aoa_wing_total - alpha0_rad
-
-                # weigh the spanwise lift according to the distributions of aoa_eff
-                # (meaning global AoA + local twist - local alpha0)
-                spanwise_lift_half_wing_weighted = spanwise_lift_half_wing * aoa_eff
-
-                #                ####################################################################################################
-                #                # weigh the spanwise lift according to the local chord (TO BE TESTED). Divide by mac to maintain
-                #                # unit consistency
-                #                spanwise_lift_half_wing_weighted = spanwise_lift_half_wing_weighted * chord / self.wings[i].mac
-                #                ####################################################################################################
-
-                # compute scaling factor to preserve integral lift while weighting the spanwise lift distribution
-                # (just the half of the integral wing, as here the half wing is considered)
-                scaling_fac_lift = (
-                    0.5 * lift / np.sum(spanwise_lift_half_wing_weighted * y_span)
-                )
-
-                # rescale spanwise_lift_half_wing_weighted to match the integral lift value
-                spanwise_lift_half_wing = (
-                    scaling_fac_lift * spanwise_lift_half_wing_weighted
-                )
-
-                # compute spanwise m_y on the half wing
-                spanwise_m_y_half_wing = m_y * 0.5 / y_span
-
-                # weigh the spanwise moment m_y according to the local chord. Divide by mac to maintain unit consistency
-                spanwise_m_y_half_wing_weighted = (
-                    spanwise_m_y_half_wing * chord / self.wings[i].mac
-                )
-
-                # compute scaling factor to preserve integral m_y while weighting the spanwise moment distribution
-                sacling_fac_m_y = (
-                    0.5 * m_y / np.sum(spanwise_m_y_half_wing_weighted * y_span)
-                )
-
-                # rescale spanwise_m_y_half_wing_weighted to match the integral m_y value
-                spanwise_m_y_half_wing_weighted = (
-                    sacling_fac_m_y * spanwise_m_y_half_wing_weighted
-                )
-
-                # compute elliptical drag distribution
-                spanwise_drag_half_wing = (
-                    -4
-                    * drag
-                    / (np.pi * 2 * wing_accumlated_half_span)
-                    * np.sqrt(1 - (2 * y_cen / (2 * wing_accumlated_half_span)) ** 2)
-                )
-
-                if self.wings[i].symmetry == True:
-                    # Create the negative part of the sequences
+                if self.wings[i].symmetry:
                     negative_part_y_cen = -np.flip(y_cen)
                     negative_part_y_span = np.flip(y_span)
 
-                    # Mirror the spanwise lift, drag and moment distribution for the other half-wing
                     spanwise_lift_other_half_wing = np.flip(spanwise_lift_half_wing)
-                    spanwise_drag_other_half_wing = np.flip(spanwise_drag_half_wing)
-                    spanwise_m_y_other_half_wing_weighted = np.flip(
-                        spanwise_m_y_half_wing_weighted
+                    spanwise_drag_other_half_wing = np.flip(
+                        -drag * y_span / wing_accumlated_half_span
                     )
 
-                    # Concatenate the negative part with the original array
                     y_cen = np.concatenate((negative_part_y_cen, y_cen))
                     y_span = np.concatenate((negative_part_y_span, y_span))
                     fz = np.concatenate(
                         (spanwise_lift_other_half_wing, spanwise_lift_half_wing)
                     )
                     fx = np.concatenate(
-                        (spanwise_drag_other_half_wing, spanwise_drag_half_wing)
-                    )
-                    spanwise_m_y_weighted = np.concatenate(
                         (
-                            spanwise_m_y_other_half_wing_weighted,
-                            spanwise_m_y_half_wing_weighted,
+                            spanwise_drag_other_half_wing,
+                            -drag * y_span / wing_accumlated_half_span,
                         )
                     )
-
-                    # fy (-> lateral force on wing) is assumed to be equal along the wingspan and 0
                     fy = np.zeros_like(fz)
-
+                    mo = np.zeros_like(fz)
                 else:
                     raise ValueError(
                         "Only symmetric wings are currently supported by this solver",
@@ -594,21 +859,5 @@ class Driver:
             fx.tolist(),
             fy.tolist(),
             fz.tolist(),
-            spanwise_m_y_weighted.tolist(),
+            mo.tolist(),
         ]
-
-    # def _correction_factors(self, reynolds_number, aspect_ratio):
-    #     cL_alpha = (
-    #         0.2923 * reynolds_number**0.1196 * aspect_ratio ** (-0.1231)
-    #         - 2.662 * 10 ** (-7) * reynolds_number
-    #         + 0.008293 * aspect_ratio
-    #     )
-    #     alpha_cL0 = 0.8007 + 1.954 * 10**7 * reynolds_number ** (-1.427)
-    #     k1 = (
-    #         7325 * reynolds_number ** (-0.7374) * aspect_ratio ** (0.3261)
-    #         + 8.214 * 10 ** (-7) * reynolds_number
-    #         + 0.032 * aspect_ratio
-    #     )
-    #     k2 = 0.9331 * reynolds_number ** (0.004296) * aspect_ratio ** (0.0003579)
-
-    #     return cL_alpha, alpha_cL0, k1, k2

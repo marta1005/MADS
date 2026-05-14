@@ -7,7 +7,6 @@ import numpy as np
 
 from multiads.assembly import (
     Airfoil,
-    AirfoilFile,
     AirfoilNACA4,
     Environment,
     Propeller,
@@ -17,6 +16,7 @@ from multiads.assembly import (
 )
 from multiads.scenario.polars import POLAR_DEFAULT_AOA, PolarVariable
 from multiads.solvers import BaseSolver, SolverOptions
+from multiads.solvers.aerodynamics import SectionOptions
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -32,24 +32,25 @@ class Options(SolverOptions):
         self,
         *,
         aoa: NDArray[np.float64] | None = None,
+        model: str = "xxxlarge",
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(**kwargs)
         self.aoa = aoa
+        self.model = model
 
 
 class Neuralfoil(BaseSolver):
-    AIRFOIL = asb.Airfoil
-
-    def __init__(self, options: Options) -> None:
+    def __init__(self, options: Options | None = None) -> None:
         super().__init__()
-        self.options: Options = options
+        self.options: Options = options or Options()
         self.environment: Environment | None = None
         self.wings: Sequence[Wing] | None = None
         self.propellers: Sequence[Propeller] | None = None
         self.polars: dict[str, PolarVariable] | None = None
 
-        self.alphas = options.aoa if options.aoa is not None else POLAR_DEFAULT_AOA
+        aoa = self.options.aoa
+        self.alphas = aoa if aoa is not None else POLAR_DEFAULT_AOA
 
     def parse_variables(
         self,
@@ -84,7 +85,7 @@ class Neuralfoil(BaseSolver):
 
         return [*self.wings, *self.propellers]
 
-    def _update_wing_io(
+    def _update_wing_io(  # noqa: C901
         self,
         wing: Wing,
         inputs: list[BaseVariable],
@@ -111,7 +112,27 @@ class Neuralfoil(BaseSolver):
                     inputs.append(v)
 
             # Allocate polars
-            outputs[sec.name] = PolarVariable.from_num_points(f"{sec.name}.polar")
+            try:
+                opts = next(o for o in sec.options if type(o) is SectionOptions)
+                if opts.polar:
+                    if opts.polar_length != len(self.alphas):
+                        msg = (
+                            f"'SectionOptions' of section '{sec.name}' have a "
+                            "different polar length than specified in 'Neuralfoil'"
+                        )
+                        raise ValueError(msg)
+
+                    outputs[sec.name] = PolarVariable.from_num_points(
+                        f"{sec.name}.polar",
+                        len(self.alphas),
+                    )
+
+            except StopIteration:
+                msg = (
+                    f"Cannot compute polars of section '{sec.name}' "
+                    "as it has no 'SectionOptions'"
+                )
+                raise RuntimeError(msg) from None
 
     def _run(self) -> None:
         if (
@@ -137,20 +158,22 @@ class Neuralfoil(BaseSolver):
                     self.alphas,
                     mach,
                     reynolds,
+                    self.options.model,
                     self.polars[sec.name],
                 )
 
         for prop in self.propellers:
             for i, sec in enumerate(prop.blade.sections):
                 airfoil = self.make_airfoil(sec.airfoil)
-                speed = prop.local_velocity(i, speed)
-                mach = speed / sound_speed
-                reynolds = speed * sec.chord / kin_viscosity
+                local_speed = prop.local_velocity(i, speed)
+                mach = local_speed / sound_speed
+                reynolds = local_speed * sec.chord / kin_viscosity
                 self._compute_airfoil(
                     airfoil,
                     self.alphas,
                     mach,
                     reynolds,
+                    self.options.model,
                     self.polars[sec.name],
                 )
 
@@ -161,31 +184,84 @@ class Neuralfoil(BaseSolver):
             raise RuntimeError(msg)
 
     @classmethod
-    def make_airfoil(cls, airfoil: Airfoil) -> AIRFOIL:
-        if type(airfoil) is AirfoilNACA4:
-            return cls.AIRFOIL(name=airfoil.airfoil_name.lower())
-        if type(airfoil) is AirfoilFile:
-            return cls.AIRFOIL(name=airfoil.airfoil_name, coordinats=airfoil.filename)
-        msg = (
-            f"Airfoils of type '{type(airfoil).__name__}' are not supported "
-            f"by '{cls.__name__}'."
+    def make_airfoil(cls, airfoil: Airfoil) -> asb.Airfoil:
+        coords = airfoil.coordinates()
+        coords = np.flipud(coords)
+        return asb.Airfoil(name=airfoil.airfoil_name, coordinates=coords)
+
+    @classmethod
+    def compute_aero_from_coordinates(
+        cls,
+        *,
+        name: str,
+        coordinates: NDArray[np.float64],
+        alphas: NDArray[np.float64] | float,
+        mach: float,
+        reynolds: float,
+        model: str = "large",
+        n_crit: float = 9.0,
+        xtr_upper: float = 1.0,
+        xtr_lower: float = 1.0,
+        include_360_deg_effects: bool = True,
+    ) -> dict[str, NDArray[np.float64] | float]:
+        """Evaluate NeuralFoil for explicit airfoil coordinates."""
+
+        airfoil = asb.Airfoil(name=name, coordinates=np.asarray(coordinates, dtype=float))
+        return cls.compute_aero_from_airfoil(
+            airfoil,
+            alphas=alphas,
+            mach=mach,
+            reynolds=reynolds,
+            model=model,
+            n_crit=n_crit,
+            xtr_upper=xtr_upper,
+            xtr_lower=xtr_lower,
+            include_360_deg_effects=include_360_deg_effects,
         )
-        raise RuntimeError(msg)
+
+    @classmethod
+    def compute_aero_from_airfoil(
+        cls,
+        airfoil: asb.Airfoil,
+        *,
+        alphas: NDArray[np.float64] | float,
+        mach: float,
+        reynolds: float,
+        model: str = "large",
+        n_crit: float = 9.0,
+        xtr_upper: float = 1.0,
+        xtr_lower: float = 1.0,
+        include_360_deg_effects: bool = True,
+    ) -> dict[str, NDArray[np.float64] | float]:
+        """Evaluate NeuralFoil for an AeroSandbox airfoil."""
+
+        return airfoil.get_aero_from_neuralfoil(
+            alpha=alphas,
+            Re=reynolds,
+            mach=mach,
+            n_crit=n_crit,
+            xtr_upper=xtr_upper,
+            xtr_lower=xtr_lower,
+            model_size=model,
+            include_360_deg_effects=include_360_deg_effects,
+        )
 
     @classmethod
     def _compute_airfoil(
         cls,
-        airfoil: AIRFOIL,
+        airfoil: asb.Airfoil,
         alphas: NDArray[np.float64],
         mach: float,
         reynolds: float,
+        model: str,
         polar: PolarVariable,
     ) -> None:
-        out = airfoil.get_aero_from_neuralfoil(
-            alpha=alphas,
-            Re=reynolds,
+        out = cls.compute_aero_from_airfoil(
+            airfoil,
+            alphas=alphas,
+            reynolds=reynolds,
             mach=mach,
-            model_size="xxxlarge",  # The largest model is still fast
+            model=model,
             include_360_deg_effects=True,
         )
         polar.mach = np.array([mach])

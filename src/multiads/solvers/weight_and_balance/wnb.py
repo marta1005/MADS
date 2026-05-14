@@ -28,8 +28,8 @@ class WB(BaseSolver):
         super().__init__()
         self.options: Options = options or Options()
         self.driver: Driver | None = None
-        self.wing: Sequence[Wing] | None = None
-        self.propeller: Sequence[Propeller] | None = None
+        self.wings: Sequence[Wing] | None = None
+        self.propellers: Sequence[Propeller] | None = None
         self.fuselage: Fuselage | None = None
         self.aircraft: Aircraft | None = None
         self.outputs_map: dict[str, MassPropertiesVariable] | None = None

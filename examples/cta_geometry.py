@@ -6,6 +6,7 @@ from math import atan2, degrees
 from pathlib import Path
 
 import gemseo
+import numpy as np
 
 from multiads.assembly import AirfoilCST, Section, Span, Wing
 from multiads.cases.cta_laws import (
@@ -159,10 +160,79 @@ CTA_SAMPLING = {
     "station_distribution": "le_te",
 }
 
+CTA_B1_FIXED_M = 8.041
+CTA_SPAN_OUTER_BASE_M = 31.4585
+CTA_SPAN_OUTER_BOUNDS_M = (28.0, 35.0)
+CTA_B2_SPAN_RATIO_BASE = 0.1419998
+CTA_B2_SPAN_RATIO_BOUNDS = (0.13, 0.21)
+CTA_CHORD_C0_BASE_M = 41.17952274
+CTA_CHORD_C0_BOUNDS_M = (39.0, 43.0)
+CTA_CHORD_C3_BASE_M = 13.9269627
+CTA_CHORD_C3_BOUNDS_M = (13.0, 16.0)
+CTA_CHORD_C4_C3_RATIO_BASE = 0.5578
+CTA_CHORD_C4_C3_RATIO_BOUNDS = (0.45, 0.60)
+CTA_CHORD_C4_BASE_M = CTA_CHORD_C3_BASE_M * CTA_CHORD_C4_C3_RATIO_BASE
+CTA_CHORD_C5_BASE_M = 0.8
+CTA_CHORD_C5_BOUNDS_M = (0.8, 1.8)
+CTA_SWEEP_S2_BASE_DEG = 34.6
+CTA_SWEEP_S2_BOUNDS_DEG = (15.0, 45.0)
+CTA_SWEEP_S3_BASE_DEG = 24.7
+CTA_SWEEP_S3_BOUNDS_DEG = (22.0, 33.0)
+CTA_MED_3_TE_SWEEP_BASE_DEG = 0.0
+CTA_MED_3_TE_SWEEP_BOUNDS_DEG = (-10.0, 25.0)
+CTA_TWIST_C0_C3_BASE_DEG = 1.0
+CTA_TWIST_C0_C3_BOUNDS_DEG = (0.2, 2.0)
+CTA_TWIST_C4_BASE_DEG = 0.8
+CTA_TWIST_C4_BOUNDS_DEG = (0.1, 1.5)
+CTA_TWIST_C5_BASE_DEG = 0.6
+CTA_TWIST_C5_BOUNDS_DEG = (0.1, 1.0)
+CTA_LE_X_C0_BASE_M = 3.513099
+CTA_LE_X_BODY_HELPER_01_BASE_M = 5.418099
+CTA_LE_X_BODY_HELPER_02_BASE_M = 14.279277199459
+CTA_LE_X_C3_BASE_M = 19.299046611133836
+CTA_LE_X_C4_BASE_M = 25.459944426354326
+CTA_LE_X_C5_BASE_M = 39.61671597215417
+CTA_ACTIVE_CAMBER_COEFF_INDICES = (1, 2, 3)
+CTA_CAMBER_MODE_BOUNDS = (-0.08, 0.08)
+CTA_CAMBER_MODE_STATIONS = ("c0", "c3", "c4", "c5")
+CTA_BASE_COEFFICIENTS = {
+    "c0": (CTA_C0_UPPER_CST, CTA_C0_LOWER_CST),
+    "c3": (CTA_C3_UPPER_CST, CTA_C3_LOWER_CST),
+    "c4": (CTA_C4_UPPER_CST, CTA_C4_LOWER_CST),
+    "c5": (CTA_C5_UPPER_CST, CTA_C5_LOWER_CST),
+}
+CTA_CAMBER_MODE_KEYS = tuple(
+    (station, coeff_idx)
+    for station in CTA_CAMBER_MODE_STATIONS
+    for coeff_idx in CTA_ACTIVE_CAMBER_COEFF_INDICES
+)
+CTA_CAMBER_COEFFICIENT_KEYS = tuple(
+    (station, side, coeff_idx)
+    for station in CTA_CAMBER_MODE_STATIONS
+    for side in ("upper", "lower")
+    for coeff_idx in CTA_ACTIVE_CAMBER_COEFF_INDICES
+)
+
 
 # ---------------------------------------------------------------------------
 # Variables
 # ---------------------------------------------------------------------------
+# Internal MADS variables consumed by the actual Section/Wing objects.
+chord_c0 = VariableFloat("cta_chord_c0", CTA_CHORD_C0_BASE_M)
+chord_c3 = VariableFloat("cta_chord_c3", CTA_CHORD_C3_BASE_M)
+chord_c4 = VariableFloat("cta_chord_c4", CTA_CHORD_C4_BASE_M)
+chord_c5 = VariableFloat("cta_chord_c5", CTA_CHORD_C5_BASE_M)
+camber_coefficient_variables = {
+    key: VariableFloat(
+        f"cta_{key[0]}_{key[1]}_cst_c{key[2]}",
+        CTA_BASE_COEFFICIENTS[key[0]][0 if key[1] == "upper" else 1][key[2]],
+    )
+    for key in CTA_CAMBER_COEFFICIENT_KEYS
+}
+
+# Inner variables: fixed in the current explicit CTA example. They remain regular
+# VariableFloat instances so the example still follows the current MADS component
+# update mechanism used in the HERA workflows.
 cst_n1 = VariableFloat("cta_cst_n1", CTA_CST_N1)
 cst_n2 = VariableFloat("cta_cst_n2", CTA_CST_N2)
 
@@ -173,12 +243,12 @@ y_c3 = VariableFloat("cta_y_c3", 8.041)
 y_c4 = VariableFloat("cta_y_c4", 12.5081007083)
 y_c5 = VariableFloat("cta_y_c5", 39.4995)
 
-le_x_c0 = VariableFloat("cta_le_x_c0", 3.513099)
-le_x_body_helper_01 = VariableFloat("cta_le_x_body_helper_01", 5.418099)
-le_x_body_helper_02 = VariableFloat("cta_le_x_body_helper_02", 14.279277199459)
-le_x_c3 = VariableFloat("cta_le_x_c3", 19.225007568463)
-le_x_c4 = VariableFloat("cta_le_x_c4", 25.288137150171)
-le_x_c5 = VariableFloat("cta_le_x_c5", 39.61671597215417)
+le_x_c0 = VariableFloat("cta_le_x_c0", CTA_LE_X_C0_BASE_M)
+le_x_body_helper_01 = VariableFloat("cta_le_x_body_helper_01", CTA_LE_X_BODY_HELPER_01_BASE_M)
+le_x_body_helper_02 = VariableFloat("cta_le_x_body_helper_02", CTA_LE_X_BODY_HELPER_02_BASE_M)
+le_x_c3 = VariableFloat("cta_le_x_c3", CTA_LE_X_C3_BASE_M)
+le_x_c4 = VariableFloat("cta_le_x_c4", CTA_LE_X_C4_BASE_M)
+le_x_c5 = VariableFloat("cta_le_x_c5", CTA_LE_X_C5_BASE_M)
 
 le_z_c0 = VariableFloat("cta_le_z_c0", 0.25865)
 le_z_body_helper_01 = VariableFloat("cta_le_z_body_helper_01", 1.03474)
@@ -187,12 +257,8 @@ le_z_c3 = VariableFloat("cta_le_z_c3", 0.67693)
 le_z_c4 = VariableFloat("cta_le_z_c4", 0.72992)
 le_z_c5 = VariableFloat("cta_le_z_c5", 1.97538)
 
-chord_c0 = VariableFloat("cta_chord_c0", 41.17952274)
 chord_body_helper_01 = VariableFloat("cta_chord_body_helper_01", 39.27452274)
 chord_body_helper_02 = VariableFloat("cta_chord_body_helper_02", 30.413344540541)
-chord_c3 = VariableFloat("cta_chord_c3", 14.00100174267)
-chord_c4 = VariableFloat("cta_chord_c4", 7.940267070244)
-chord_c5 = VariableFloat("cta_chord_c5", 0.8)
 
 twist_c0 = VariableFloat("cta_twist_c0", 0.778)
 twist_body_helper_01 = VariableFloat("cta_twist_body_helper_01", -0.342)
@@ -207,10 +273,21 @@ te_body_helper_02 = VariableFloat("cta_te_body_helper_02", 0.001852260963915209)
 te_c3 = VariableFloat("cta_te_c3", 0.0030467512248412917)
 te_c4 = VariableFloat("cta_te_c4", 0.002362304664394475)
 te_c5 = VariableFloat("cta_te_c5", 0.0021855582271015795)
+thickness_factor_c0 = VariableFloat("cta_thickness_factor_c0", 1.0)
+thickness_factor_c3 = VariableFloat("cta_thickness_factor_c3", 1.0)
+thickness_factor_c4 = VariableFloat("cta_thickness_factor_c4", 1.0)
+thickness_factor_c5 = VariableFloat("cta_thickness_factor_c5", 1.0)
+thickness_factor_body_helper_01 = VariableFloat("cta_thickness_factor_body_helper_01", 1.0)
+thickness_factor_body_helper_02 = VariableFloat("cta_thickness_factor_body_helper_02", 1.0)
+med_3_te_sweep_internal = VariableFloat("cta_med_3_te_sweep_deg", CTA_MED_3_TE_SWEEP_BASE_DEG)
 
-variables = [
+inner_variables = [
     cst_n1,
     cst_n2,
+    chord_c0,
+    chord_c3,
+    chord_c4,
+    chord_c5,
     y_c0,
     y_body_helper_01,
     y_body_helper_02,
@@ -229,12 +306,8 @@ variables = [
     le_z_c3,
     le_z_c4,
     le_z_c5,
-    chord_c0,
     chord_body_helper_01,
     chord_body_helper_02,
-    chord_c3,
-    chord_c4,
-    chord_c5,
     twist_c0,
     twist_body_helper_01,
     twist_body_helper_02,
@@ -247,7 +320,47 @@ variables = [
     te_c3,
     te_c4,
     te_c5,
+    thickness_factor_c0,
+    thickness_factor_c3,
+    thickness_factor_c4,
+    thickness_factor_c5,
+    thickness_factor_body_helper_01,
+    thickness_factor_body_helper_02,
+    med_3_te_sweep_internal,
 ]
+
+variables = [*inner_variables, *camber_coefficient_variables.values()]
+
+
+def _cst_coefficients_with_camber_modes(
+    station: str,
+    side: str,
+    baseline_coefficients: tuple[float, ...],
+) -> tuple[float | VariableFloat, ...]:
+    coefficients: list[float | VariableFloat] = list(baseline_coefficients)
+    for coeff_idx in CTA_ACTIVE_CAMBER_COEFF_INDICES:
+        coefficients[coeff_idx] = camber_coefficient_variables[(station, side, coeff_idx)]
+    return tuple(coefficients)
+
+
+def _camber_mode_coefficient_mapping(*mode_values):  # noqa: ANN002, ANN201
+    modes = {
+        key: float(np.ravel(value)[0])
+        for key, value in zip(CTA_CAMBER_MODE_KEYS, mode_values, strict=True)
+    }
+    outputs = []
+    for station, side, coeff_idx in CTA_CAMBER_COEFFICIENT_KEYS:
+        upper_base, lower_base = CTA_BASE_COEFFICIENTS[station]
+        scale = 0.5 * (upper_base[coeff_idx] + lower_base[coeff_idx])
+        delta = modes[(station, coeff_idx)] * scale
+        if side == "upper":
+            outputs.append(upper_base[coeff_idx] + delta)
+        else:
+            outputs.append(lower_base[coeff_idx] - delta)
+    return tuple(outputs)
+
+
+map_cta_camber_modes_to_coefficients = _camber_mode_coefficient_mapping
 
 
 # ---------------------------------------------------------------------------
@@ -257,11 +370,12 @@ section_c0 = Section(
     name="cta_c0",
     airfoil=AirfoilCST(
         name="cta_c0_airfoil",
-        upper_coefficients=CTA_C0_UPPER_CST,
-        lower_coefficients=CTA_C0_LOWER_CST,
+        upper_coefficients=_cst_coefficients_with_camber_modes("c0", "upper", CTA_C0_UPPER_CST),
+        lower_coefficients=_cst_coefficients_with_camber_modes("c0", "lower", CTA_C0_LOWER_CST),
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_c0,
+        thickness_factor=thickness_factor_c0,
     ),
     chord=chord_c0,
     twist=twist_c0,
@@ -279,6 +393,7 @@ section_body_helper_01 = Section(
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_body_helper_01,
+        thickness_factor=thickness_factor_body_helper_01,
     ),
     chord=chord_body_helper_01,
     twist=twist_body_helper_01,
@@ -296,6 +411,7 @@ section_body_helper_02 = Section(
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_body_helper_02,
+        thickness_factor=thickness_factor_body_helper_02,
     ),
     chord=chord_body_helper_02,
     twist=twist_body_helper_02,
@@ -308,11 +424,12 @@ section_c3 = Section(
     name="cta_c3",
     airfoil=AirfoilCST(
         name="cta_c3_airfoil",
-        upper_coefficients=CTA_C3_UPPER_CST,
-        lower_coefficients=CTA_C3_LOWER_CST,
+        upper_coefficients=_cst_coefficients_with_camber_modes("c3", "upper", CTA_C3_UPPER_CST),
+        lower_coefficients=_cst_coefficients_with_camber_modes("c3", "lower", CTA_C3_LOWER_CST),
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_c3,
+        thickness_factor=thickness_factor_c3,
     ),
     chord=chord_c3,
     twist=twist_c3,
@@ -325,11 +442,12 @@ section_c4 = Section(
     name="cta_c4",
     airfoil=AirfoilCST(
         name="cta_c4_airfoil",
-        upper_coefficients=CTA_C4_UPPER_CST,
-        lower_coefficients=CTA_C4_LOWER_CST,
+        upper_coefficients=_cst_coefficients_with_camber_modes("c4", "upper", CTA_C4_UPPER_CST),
+        lower_coefficients=_cst_coefficients_with_camber_modes("c4", "lower", CTA_C4_LOWER_CST),
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_c4,
+        thickness_factor=thickness_factor_c4,
     ),
     chord=chord_c4,
     twist=twist_c4,
@@ -342,11 +460,12 @@ section_c5 = Section(
     name="cta_c5",
     airfoil=AirfoilCST(
         name="cta_c5_airfoil",
-        upper_coefficients=CTA_C5_UPPER_CST,
-        lower_coefficients=CTA_C5_LOWER_CST,
+        upper_coefficients=_cst_coefficients_with_camber_modes("c5", "upper", CTA_C5_UPPER_CST),
+        lower_coefficients=_cst_coefficients_with_camber_modes("c5", "lower", CTA_C5_LOWER_CST),
         n1=cst_n1,
         n2=cst_n2,
         trailing_edge_thickness=te_c5,
+        thickness_factor=thickness_factor_c5,
     ),
     chord=chord_c5,
     twist=twist_c5,
@@ -431,6 +550,7 @@ wing = Wing(
         "sampling": copy.deepcopy(CTA_SAMPLING),
     },
 )
+wing.cta_med_3_te_sweep_deg = med_3_te_sweep_internal
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +565,6 @@ disc_geometry = Geometry(
 
 def main() -> None:
     input_data = {variable.name: variable.value_np.copy() for variable in variables}
-
     geometry_outputs = disc_geometry.execute(input_data=input_data)
     resolved_wing = disc_geometry.components[0]
     if not isinstance(resolved_wing, Wing):
