@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess as sp
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
@@ -100,6 +101,7 @@ class Options(SolverOptions):
         dt: float | None = None,
         dt_out: float | None = None,
         output_start: bool = False,
+        post_preprocess_hook: Callable[[Path], None] | None = None,
         n_turns: float = 4,
         steps_per_turn: int = 40,
         n_wake_panels: int = 1,
@@ -148,6 +150,7 @@ class Options(SolverOptions):
         self.dt = dt
         self.dt_out = dt_out
         self.output_start = output_start
+        self.post_preprocess_hook = post_preprocess_hook
         self.n_turns = n_turns
         self.steps_per_turn = steps_per_turn
         self.n_wake_panels = n_wake_panels
@@ -259,6 +262,7 @@ class OutputOptions:
         loads_step: int = 1,
         loads_end: int = 0,
         loads_avg: bool = False,
+        loads_reference: str = "0",
         spanwise_start: int = 0,
         spanwise_step: int = 1,
         spanwise_end: int = 0,
@@ -289,6 +293,7 @@ class OutputOptions:
         self.loads_step = loads_step
         self.loads_end = loads_end
         self.loads_avg = loads_avg
+        self.loads_reference = loads_reference
         self.spanwise_start = spanwise_start
         self.spanwise_step = spanwise_step
         self.spanwise_end = spanwise_end
@@ -536,14 +541,28 @@ class WingOptions(assembly.ComponentOptions):
         panel_type: WingPanelType | None = None,
         num_panels: int = 0,
         mesh_file: Path | None = None,
+        mesh_file_type: str | None = None,
+        mesh_definition: Sequence[str] | None = None,
         inner_product_te: float | None = None,
+        tol_se_wing: float | None = None,
+        proj_te: bool | None = None,
+        proj_te_dir: str | None = None,
+        proj_te_vector: Sequence[float] | None = None,
         output_options: OutputOptions | None = None,
     ) -> None:
         self.method = discretization_method
         self.panel_type = panel_type
         self.num_panels = num_panels
         self.mesh_file = mesh_file
+        self.mesh_file_type = mesh_file_type
+        self.mesh_definition = tuple(mesh_definition or ())
         self.inner_product_te = inner_product_te
+        self.tol_se_wing = tol_se_wing
+        self.proj_te = proj_te
+        self.proj_te_dir = proj_te_dir
+        self.proj_te_vector = (
+            None if proj_te_vector is None else np.asarray(proj_te_vector, dtype=float)
+        )
         self.output_opts = output_options or OutputOptions()
         self._check_args()
 
@@ -569,6 +588,8 @@ class Wing:
         panel_type: WingPanelType | None = None,
         num_panels: int = 100.0,
         mesh_file: Path | None = None,
+        mesh_file_type: str | None = None,
+        mesh_definition: Sequence[str] | None = None,
         pos: NDArray[np.float64] | None = None,
         offset: NDArray[np.float64] | None = None,
         scaling: float = 1.0,
@@ -577,6 +598,10 @@ class Wing:
         roll: float = 0.0,
         xc_ref: float = 0.25,
         inner_product_te: float | None = None,
+        tol_se_wing: float | None = None,
+        proj_te: bool | None = None,
+        proj_te_dir: str | None = None,
+        proj_te_vector: Sequence[float] | None = None,
         symmetry: bool = False,
         mirror: bool = False,
         options: OutputOptions | None = None,
@@ -589,12 +614,20 @@ class Wing:
         self.panel_type = panel_type
         self.num_panels = num_panels
         self.mesh_file = mesh_file
+        self.mesh_file_type = mesh_file_type
+        self.mesh_definition = tuple(mesh_definition or ())
         self.scaling = scaling
         self.alpha = alpha
         self.beta = beta
         self.roll = roll
         self.xc_ref = xc_ref
         self.inner_product_te = inner_product_te
+        self.tol_se_wing = tol_se_wing
+        self.proj_te = proj_te
+        self.proj_te_dir = proj_te_dir
+        self.proj_te_vector = (
+            None if proj_te_vector is None else np.asarray(proj_te_vector, dtype=float)
+        )
         self.symmetry = symmetry
         self.mirror = mirror
         self.options = options or OutputOptions()
@@ -619,6 +652,8 @@ class Wing:
                 panel_type=opts.panel_type,
                 num_panels=opts.num_panels,
                 mesh_file=opts.mesh_file,
+                mesh_file_type=opts.mesh_file_type,
+                mesh_definition=opts.mesh_definition,
                 pos=comp.global_pos,
                 offset=comp.offset,
                 scaling=comp.scaling,
@@ -627,6 +662,10 @@ class Wing:
                 roll=comp.roll,
                 xc_ref=comp.xc_ref,
                 inner_product_te=opts.inner_product_te,
+                tol_se_wing=opts.tol_se_wing,
+                proj_te=opts.proj_te,
+                proj_te_dir=opts.proj_te_dir,
+                proj_te_vector=opts.proj_te_vector,
                 symmetry=comp.symmetry,
                 mirror=comp.mirror,
                 options=opts.output_opts,
@@ -645,7 +684,13 @@ class Wing:
         if opts := next((o for o in comp.options if type(o) is WingOptions), None):
             self.num_panels = opts.num_panels
             self.mesh_file = opts.mesh_file
+            self.mesh_file_type = opts.mesh_file_type
+            self.mesh_definition = opts.mesh_definition
             self.inner_product_te = opts.inner_product_te
+            self.tol_se_wing = opts.tol_se_wing
+            self.proj_te = opts.proj_te
+            self.proj_te_dir = opts.proj_te_dir
+            self.proj_te_vector = opts.proj_te_vector
 
         self.pos = comp.global_pos
         self.offset = comp.offset
@@ -664,6 +709,12 @@ class Wing:
             f.writelines(self._make_sections())
 
     def _make_header(self) -> Sequence[str]:
+        if self.mesh_file_type:
+            out = []
+            if self.mesh_file:
+                out.append(f"mesh_file = {self.mesh_file}\n")
+            out.append(f"mesh_file_type = {self.mesh_file_type}\n")
+            return out
         if self.mesh_file:
             ext = self.mesh_file.suffix
             file_type = "cgns" if (ext == ".cgns") else "basic"
@@ -690,6 +741,18 @@ class Wing:
         ]
         if self.inner_product_te is not None:
             out += [f"inner_product_te = {self.inner_product_te:.6f}\n"]
+        if self.tol_se_wing is not None:
+            out += [f"tol_se_wing = {self.tol_se_wing:.6e}\n"]
+        if self.proj_te is not None:
+            out += [f"proj_te = {'T' if self.proj_te else 'F'}\n"]
+            if self.proj_te and self.proj_te_dir is not None:
+                out += [f"proj_te_dir = {self.proj_te_dir}\n"]
+            if self.proj_te and self.proj_te_vector is not None:
+                out += [
+                    "proj_te_vector = (/ {:.6f}, {:.6f}, {:.6f} /)\n".format(
+                        *self.proj_te_vector,
+                    ),
+                ]
 
         # Modify offsets when using lifting lines
         if self.method == WingMethod.LIFTING_LINE:
@@ -732,6 +795,9 @@ class Wing:
         return out
 
     def _make_sections(self) -> Sequence[str]:
+        if self.mesh_definition:
+            return self.mesh_definition
+
         # No sections if using an external mesh file
         if self.mesh_file:
             return []
@@ -1634,4 +1700,9 @@ class Driver:
     def parse_dust_post(self, analyses: Sequence[Post]) -> None:
         for analysis in analyses:
             file = self.options.post_dir / f"{self.options.name}_{analysis.name}.dat"
-            analysis.parse_file(file)
+            try:
+                analysis.parse_file(file)
+            except FileNotFoundError:
+                if isinstance(analysis, PostSpanwiseLoads):
+                    continue
+                raise

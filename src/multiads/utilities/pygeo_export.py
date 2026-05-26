@@ -32,10 +32,19 @@ def export_prepared_geometry_to_pygeo(geometry: PreparedGeometry) -> PyGeoExport
 
     frame_kwargs = dict(export_cfg.metadata.get("xy_frame", {}))
 
+    frame_surfaces = (
+        build_xy_symmetry_frame_surfaces(geometry, **frame_kwargs)
+        if export_cfg.include_xy_symmetry_frame
+        or meshing_iges_path is not None
+        or export_cfg.write_frame_only
+        or frame_only_iges_path is not None
+        else None
+    )
+
     meshing_surface = None
     if export_cfg.include_xy_symmetry_frame or meshing_iges_path is not None:
         meshing_surface = _build_pygeo_surface(geometry, airfoil_paths, te_height_scaled=te_height_scaled)
-        append_xy_symmetry_frame_surfaces(meshing_surface, geometry, **frame_kwargs)
+        append_xy_symmetry_frame_surfaces(meshing_surface, frame_surfaces=frame_surfaces)
         if meshing_iges_path is not None:
             meshing_iges_path.parent.mkdir(parents=True, exist_ok=True)
             meshing_surface.writeIGES(str(meshing_iges_path))
@@ -43,7 +52,7 @@ def export_prepared_geometry_to_pygeo(geometry: PreparedGeometry) -> PyGeoExport
     frame_only_surface = None
     if export_cfg.write_frame_only or frame_only_iges_path is not None:
         frame_only_surface = _build_pygeo_surface(geometry, airfoil_paths, te_height_scaled=te_height_scaled)
-        frame_only_surface.surfs = build_xy_symmetry_frame_surfaces(geometry, **frame_kwargs)
+        frame_only_surface.surfs = list(frame_surfaces or ())
         frame_only_surface.nSurf = len(frame_only_surface.surfs)
         if frame_only_iges_path is not None:
             frame_only_iges_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +72,7 @@ def export_prepared_geometry_to_pygeo(geometry: PreparedGeometry) -> PyGeoExport
         frame_only_iges_path=None if frame_only_iges_path is None else str(frame_only_iges_path),
         metadata={
             "airfoil_distribution_mode": mode,
+            "pygeo_mode": str(export_cfg.pygeo_mode),
             "symmetric": bool(export_cfg.symmetric),
             "include_xy_symmetry_frame": bool(export_cfg.include_xy_symmetry_frame),
             "write_frame_only": bool(export_cfg.write_frame_only),
@@ -116,6 +126,8 @@ def _write_station_airfoils(
     *,
     mode: str,
 ) -> list[str | None]:
+    _clean_generated_airfoil_files(profiles_dir)
+
     if mode == "all":
         airfoil_paths: list[str | None] = []
         for idx, station in enumerate(geometry.resolved_stations):
@@ -149,6 +161,13 @@ def _write_station_airfoils(
     return airfoil_paths
 
 
+def _clean_generated_airfoil_files(profiles_dir: Path) -> None:
+    for pattern in ("station_*.dat", "anchor_*.dat"):
+        for path in profiles_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+
+
 def _write_airfoil_dat(
     path: Path,
     x_over_c: np.ndarray,
@@ -176,7 +195,12 @@ def _write_airfoil_dat(
 def _build_te_height_scaled(stations: tuple[ResolvedStation, ...]) -> np.ndarray:
     return np.array(
         [
-            float(station.upper_z_over_c[-1] - station.lower_z_over_c[-1])
+            float(
+                station.metadata.get(
+                    "pygeo_te_height_scaled",
+                    station.upper_z_over_c[-1] - station.lower_z_over_c[-1],
+                )
+            )
             for station in stations
         ],
         dtype=float,
@@ -310,16 +334,30 @@ def build_xy_symmetry_frame_surfaces(
     y_max_m: float | None = None,
 ):
     root_station = _root_station(geometry.resolved_stations)
-    x_upper = np.asarray(root_station.upper_surface_xyz_m[:, 0], dtype=float)
-    y_upper = np.asarray(root_station.upper_surface_xyz_m[:, 2], dtype=float)
-    x_lower = np.asarray(root_station.lower_surface_xyz_m[:, 0], dtype=float)
-    y_lower = np.asarray(root_station.lower_surface_xyz_m[:, 2], dtype=float)
+    x_air = np.asarray(root_station.x_over_c, dtype=float)
+    chord = max(float(root_station.chord_m), 1.0e-6)
+    x_local = x_air * chord
+    y_upper_local = np.asarray(root_station.upper_z_over_c, dtype=float) * chord
+    y_lower_local = np.asarray(root_station.lower_z_over_c, dtype=float) * chord
+
+    twist_rad = np.deg2rad(float(root_station.twist_deg))
+    cos_twist = float(np.cos(twist_rad))
+    sin_twist = float(np.sin(twist_rad))
+    leading_edge_x = float(root_station.leading_edge_x_m)
+    leading_edge_y = float(root_station.leading_edge_z_m)
+
+    # Build the frame in the same x-y plane used by the pyGeo liftingSurface
+    # export. Do not reuse the already-resolved xyz station coordinates here:
+    # those are in the MADS model frame and may use a different twist pivot.
+    x_upper = leading_edge_x + x_local * cos_twist - y_upper_local * sin_twist
+    y_upper = leading_edge_y + x_local * sin_twist + y_upper_local * cos_twist
+    x_lower = leading_edge_x + x_local * cos_twist - y_lower_local * sin_twist
+    y_lower = leading_edge_y + x_local * sin_twist + y_lower_local * cos_twist
 
     x_min_hole = float(min(np.min(x_upper), np.min(x_lower)))
     x_max_hole = float(max(np.max(x_upper), np.max(x_lower)))
     y_min_hole = float(min(np.min(y_upper), np.min(y_lower)))
     y_max_hole = float(max(np.max(y_upper), np.max(y_lower)))
-    chord = max(root_station.chord_m, 1.0e-6)
     root_height = max(y_max_hole - y_min_hole, 1.0e-6)
 
     x_margin = max(float(x_margin_factor) * chord, float(min_x_margin_m))
@@ -353,10 +391,16 @@ def build_xy_symmetry_frame_surfaces(
 
 def append_xy_symmetry_frame_surfaces(
     geometry_surface,
-    geometry: PreparedGeometry,
+    geometry: PreparedGeometry | None = None,
+    *,
+    frame_surfaces=None,
     **kwargs,
 ):
-    frame_surfaces = build_xy_symmetry_frame_surfaces(geometry, **kwargs)
+    if frame_surfaces is None:
+        if geometry is None:
+            msg = "geometry is required when frame_surfaces are not provided"
+            raise ValueError(msg)
+        frame_surfaces = build_xy_symmetry_frame_surfaces(geometry, **kwargs)
     geometry_surface.surfs.extend(frame_surfaces)
     geometry_surface.nSurf = len(geometry_surface.surfs)
     return geometry_surface

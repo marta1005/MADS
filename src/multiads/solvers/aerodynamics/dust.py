@@ -286,11 +286,14 @@ class DUST(BaseSolver):
 
         self._write_polars()
 
-        self.driver.preprocess()
-        self.driver.run()
-
-        # Back to main directory
-        os.chdir(main_dir)
+        try:
+            self.driver.preprocess()
+            if self.options.post_preprocess_hook is not None:
+                self.options.post_preprocess_hook(self.run_directory)
+            self.driver.run()
+        finally:
+            # Back to main directory
+            os.chdir(main_dir)
 
     def _write_polars(self) -> None:
         if self.wings is None or self.propellers is None or self.polars is None:
@@ -330,8 +333,8 @@ class DUST(BaseSolver):
         if viz_analysis:
             analyses = [
                 *loads_analyses.values(),
-                *span_analyses.values(),
                 viz_analysis,
+                *span_analyses.values(),
             ]
         else:
             analyses = [*loads_analyses.values(), *span_analyses.values()]
@@ -387,6 +390,7 @@ class DUST(BaseSolver):
                     start_res=wing.options.loads_start,
                     end_res=wing.options.loads_end,
                     step_res=wing.options.loads_step,
+                    reference=wing.options.loads_reference,
                     components=[wing.name],
                 )
 
@@ -398,6 +402,7 @@ class DUST(BaseSolver):
                     start_res=prop.options.loads_start,
                     end_res=prop.options.loads_end,
                     step_res=prop.options.loads_step,
+                    reference=prop.options.loads_reference,
                     components=[prop.name],
                 )
 
@@ -408,6 +413,7 @@ class DUST(BaseSolver):
                 start_res=self.options.output_options.loads_start,
                 end_res=self.options.output_options.loads_end,
                 step_res=self.options.output_options.loads_step,
+                reference=self.options.output_options.loads_reference,
                 components=["all"],
             )
 
@@ -457,7 +463,7 @@ class DUST(BaseSolver):
     def _process_loads_results(
         self,
         analyses: Mapping[str, dl.PostLoads],
-        environment: Environment,
+        environment: Environment,  # noqa: ARG002
         wings: Sequence[dl.Wing],
         propellers: Sequence[dl.Propeller],
         outputs: Mapping[str, InnerVariable],
@@ -466,13 +472,17 @@ class DUST(BaseSolver):
 
         for wing in wing_like:
             if loads := analyses.get(wing.name, None):
-                force = np.dot(environment.matrix_body_wind, loads.f[-1])
+                force = np.asarray(loads.f[-1], dtype=float)
+                lift = float(force[2])
+                drag = float(-force[0])
                 outputs[f"{wing.name}.force"].value = force
-                outputs[f"{wing.name}.lift"].value = force[2]
-                outputs[f"{wing.name}.drag"].value = force[0]
-                outputs[f"{wing.name}.efficiency"].value = force[2] / force[0]
+                outputs[f"{wing.name}.lift"].value = lift
+                outputs[f"{wing.name}.drag"].value = drag
+                outputs[f"{wing.name}.efficiency"].value = (
+                    lift / drag if drag != 0.0 else 0.0
+                )
 
-                moment = np.dot(environment.matrix_body_wind, loads.m[-1])
+                moment = np.asarray(loads.m[-1], dtype=float)
                 outputs[f"{wing.name}.moment"].value = moment
                 outputs[f"{wing.name}.my"].value = moment[1]
 
@@ -504,6 +514,8 @@ class DUST(BaseSolver):
                 type(var := outputs.get(f"{wing.name}.span_load", None))
                 is SpanLoadsVariable
             ):
+                if not hasattr(loads, "y_cen"):
+                    continue
                 var.centers = loads.y_cen
                 var.spans = loads.y_span
                 var.fx = loads.fx[-1]
@@ -526,18 +538,20 @@ class DUST(BaseSolver):
 
     def _process_global_results(
         self,
-        environment: Environment,
+        environment: Environment,  # noqa: ARG002
         analyses: Mapping[str, dl.PostLoads],
         outputs: Mapping[str, InnerVariable],
     ) -> None:
         if loads := analyses.get("all", None):
-            force = np.dot(environment.matrix_body_wind, loads.f[-1])
+            force = np.asarray(loads.f[-1], dtype=float)
+            lift = float(force[2])
+            drag = float(-force[0])
             outputs["force"].value = force
-            outputs["lift"].value = force[2]
-            outputs["drag"].value = force[0]
-            outputs["efficiency"].value = force[2] / force[0]
+            outputs["lift"].value = lift
+            outputs["drag"].value = drag
+            outputs["efficiency"].value = lift / drag if drag != 0.0 else 0.0
 
-            moment = np.dot(environment.matrix_body_wind, loads.m[-1])
+            moment = np.asarray(loads.m[-1], dtype=float)
             outputs["moment"].value = moment
             outputs["my"].value = moment[1]
 

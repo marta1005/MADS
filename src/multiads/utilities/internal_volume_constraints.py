@@ -383,3 +383,91 @@ def _triangle_sample_points(
         np.asarray(clearance_samples, dtype=float),
         np.asarray(weights, dtype=float),
     )
+
+
+def _triangle_barycentric_coordinates_xy(
+    x_m: float,
+    y_m: float,
+    triangle_xy_m: np.ndarray,
+) -> tuple[float, float, float] | None:
+    tri = np.asarray(triangle_xy_m, dtype=float)
+    x0, y0 = tri[0]
+    x1, y1 = tri[1]
+    x2, y2 = tri[2]
+    det = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+    if abs(float(det)) <= 1.0e-14:
+        return None
+    l0 = ((y1 - y2) * (float(x_m) - x2) + (x2 - x1) * (float(y_m) - y2)) / det
+    l1 = ((y2 - y0) * (float(x_m) - x2) + (x0 - x2) * (float(y_m) - y2)) / det
+    l2 = 1.0 - l0 - l1
+    tol = 1.0e-10
+    if l0 < -tol or l1 < -tol or l2 < -tol:
+        return None
+    return float(l0), float(l1), float(l2)
+
+
+def _surface_required_z_at_points(
+    surface: IndicatorSurfaceSpec,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+) -> np.ndarray:
+    x_arr = np.asarray(x_m, dtype=float)
+    y_arr = np.asarray(y_m, dtype=float)
+    required = np.full(x_arr.shape, np.nan, dtype=float)
+    vertices = np.asarray(surface.vertices_xyz_m, dtype=float)
+    clearance = np.asarray(surface.minimum_clearance_m, dtype=float)
+
+    for tri_idx in range(1, vertices.shape[0] - 1):
+        tri_vertices = np.vstack([vertices[0], vertices[tri_idx], vertices[tri_idx + 1]])
+        tri_xy = tri_vertices[:, :2]
+        tri_z = tri_vertices[:, 2]
+        tri_clearance = np.asarray(
+            [clearance[0], clearance[tri_idx], clearance[tri_idx + 1]],
+            dtype=float,
+        )
+        for idx, (xx, yy) in enumerate(zip(np.ravel(x_arr), np.ravel(y_arr), strict=True)):
+            flat_idx = np.unravel_index(idx, x_arr.shape)
+            if np.isfinite(required[flat_idx]):
+                continue
+            bary = _triangle_barycentric_coordinates_xy(float(xx), float(yy), tri_xy)
+            if bary is None:
+                continue
+            weights = np.asarray(bary, dtype=float)
+            z_target = float(weights @ tri_z)
+            local_clearance = float(weights @ tri_clearance)
+            if surface.sense == "upper":
+                required[flat_idx] = z_target + local_clearance
+            else:
+                required[flat_idx] = z_target - local_clearance
+    return required
+
+
+def required_constraint_bounds_at_points(
+    surfaces: tuple[IndicatorSurfaceSpec, ...] | list[IndicatorSurfaceSpec],
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return required upper/lower CAD-frame bounds at arbitrary XY points."""
+
+    x_arr = np.asarray(x_m, dtype=float)
+    y_arr = np.asarray(y_m, dtype=float)
+    upper_required = np.full(x_arr.shape, -np.inf, dtype=float)
+    lower_required = np.full(x_arr.shape, np.inf, dtype=float)
+    has_upper = np.zeros(x_arr.shape, dtype=bool)
+    has_lower = np.zeros(x_arr.shape, dtype=bool)
+
+    for surface in tuple(surfaces):
+        required = _surface_required_z_at_points(surface, x_arr, y_arr)
+        valid = np.isfinite(required)
+        if not np.any(valid):
+            continue
+        if surface.sense == "upper":
+            upper_required[valid] = np.maximum(upper_required[valid], required[valid])
+            has_upper |= valid
+        else:
+            lower_required[valid] = np.minimum(lower_required[valid], required[valid])
+            has_lower |= valid
+
+    upper_required[~has_upper] = np.nan
+    lower_required[~has_lower] = np.nan
+    return upper_required, lower_required

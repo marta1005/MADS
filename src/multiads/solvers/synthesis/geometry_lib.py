@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -182,6 +183,25 @@ class PreparedGeometry:
         raise KeyError(f"No resolved station found at y={spanwise_y_m}")
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedSurfaceMesh:
+    """Structured surface grids extracted from a resolved geometry state.
+
+    Coordinates follow the MADS/CTA model convention: x is streamwise, y is
+    spanwise and z is vertical.  The mesh is solver-independent; exporters can
+    adapt it for DUST, pyGeo, IGES or future CFD tools.
+    """
+
+    span_stations: NDArray[np.float64]
+    x_airfoil: NDArray[np.float64]
+    upper_vertices: NDArray[np.float64]
+    lower_vertices: NDArray[np.float64]
+    camber_vertices: NDArray[np.float64]
+    upper_quads: NDArray[np.int64]
+    lower_quads: NDArray[np.int64]
+    camber_quads: NDArray[np.int64]
+
+
 @dataclass(slots=True)
 class GeometryMetricSet:
     """Scalar metrics extracted from a resolved geometry state."""
@@ -194,6 +214,17 @@ class GeometryMetricSet:
     mean_aerodynamic_chord_m: float | None = None
     anchor_station_count: int = 0
     resolved_station_count: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class GeometryValidationResult:
+    """Solver-independent validation status for a prepared geometry."""
+
+    is_valid: bool
+    failure_code: int = 0
+    failure_reason: str = ""
+    minimum_margin_m: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -549,7 +580,7 @@ class HybridTailAxis:
 
     def __call__(self, y: float) -> float:
         y_val = float(y)
-        if y_val <= self._linear_start_y:
+        if y_val < self._linear_start_y:
             return float(self._prefix_axis(y_val))
         return float(self._linear_axis(y_val))
 
@@ -798,6 +829,12 @@ def _build_span_axis(
     )
 
 
+def _axis_forward_slope(axis: object, y: float) -> float:
+    yy = float(y)
+    eps = max(abs(yy) * 1.0e-4, 1.0e-5)
+    return float((axis(yy + eps) - axis(yy)) / eps)
+
+
 def build_control_point_planform(
     *,
     leading_edge_points: np.ndarray,
@@ -873,7 +910,8 @@ def build_control_point_planform(
         if body_le_fixed_points:
             blend_y = float(min(symmetry_blend_y, le_points[1, 1]))
         else:
-            blend_y = float(min(symmetry_blend_y, 0.95 * min(le_points[1, 1], te_points[1, 1])))
+            blend_y = float(min(symmetry_blend_y, min(le_points[1, 1], te_points[1, 1])))
+            le_slope0 = _axis_forward_slope(le_post_axis, blend_y)
 
         le_axis = SymmetryRootBlendAxis(
             base_axis=le_axis,
@@ -884,7 +922,7 @@ def build_control_point_planform(
             post_axis=le_post_axis,
         )
         if not body_le_fixed_points and 0 not in set(int(index) for index in te_exact_segments):
-            te_slope0 = float((te_points[1, 0] - te_points[0, 0]) / max(te_points[1, 1] - te_points[0, 1], 1.0e-12))
+            te_slope0 = _axis_forward_slope(te_axis, blend_y)
             te_axis = SymmetryRootBlendAxis(
                 base_axis=te_axis,
                 root_x=float(root_te_x),
@@ -1208,6 +1246,81 @@ def build_envelope(stations: tuple[ResolvedStation, ...]) -> GeometryEnvelope:
         lower_z_m=lower_z,
         leading_edge_x_m=leading_edge_x,
         trailing_edge_x_m=trailing_edge_x,
+    )
+
+
+def _structured_quad_connectivity(n_span: int, n_chord: int) -> NDArray[np.int64]:
+    quads: list[tuple[int, int, int, int]] = []
+    for i_span in range(int(n_span) - 1):
+        row = i_span * int(n_chord)
+        next_row = (i_span + 1) * int(n_chord)
+        for i_chord in range(int(n_chord) - 1):
+            quads.append(
+                (
+                    row + i_chord,
+                    row + i_chord + 1,
+                    next_row + i_chord + 1,
+                    next_row + i_chord,
+                )
+            )
+    return np.asarray(quads, dtype=np.int64)
+
+
+def build_resolved_surface_mesh(geometry: PreparedGeometry) -> ResolvedSurfaceMesh:
+    """Build a structured upper/lower/camber mesh from resolved stations."""
+
+    stations = geometry.resolved_stations
+    if not stations:
+        msg = "Cannot build a surface mesh from an empty geometry."
+        raise ValueError(msg)
+
+    x_airfoil = np.asarray(stations[0].x_over_c, dtype=float)
+    n_span = len(stations)
+    n_chord = int(x_airfoil.size)
+    upper_vertices = np.zeros((n_span, n_chord, 3), dtype=float)
+    lower_vertices = np.zeros((n_span, n_chord, 3), dtype=float)
+    span_stations = np.zeros(n_span, dtype=float)
+
+    for idx, station in enumerate(stations):
+        if station.x_over_c.size != n_chord:
+            msg = "All stations must share the same chordwise discretization."
+            raise ValueError(msg)
+        span_stations[idx] = float(station.spanwise_y_m)
+        upper_vertices[idx, :, :] = np.asarray(station.upper_surface_xyz_m, dtype=float)
+        lower_vertices[idx, :, :] = np.asarray(station.lower_surface_xyz_m, dtype=float)
+
+    quads = _structured_quad_connectivity(n_span, n_chord)
+    return ResolvedSurfaceMesh(
+        span_stations=span_stations,
+        x_airfoil=x_airfoil.copy(),
+        upper_vertices=upper_vertices,
+        lower_vertices=lower_vertices,
+        camber_vertices=0.5 * (upper_vertices + lower_vertices),
+        upper_quads=quads,
+        lower_quads=quads.copy(),
+        camber_quads=quads.copy(),
+    )
+
+
+def write_resolved_surface_mesh_npz(
+    path: str | Path,
+    mesh: ResolvedSurfaceMesh,
+) -> None:
+    """Write a solver-independent resolved surface mesh to ``.npz``."""
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out_path,
+        span_stations=mesh.span_stations,
+        x_airfoil=mesh.x_airfoil,
+        upper_vertices=mesh.upper_vertices,
+        lower_vertices=mesh.lower_vertices,
+        camber_vertices=mesh.camber_vertices,
+        upper_quads=mesh.upper_quads,
+        lower_quads=mesh.lower_quads,
+        camber_quads=mesh.camber_quads,
+        coordinate_frame=np.asarray(["x_streamwise_m", "y_span_m", "z_vertical_m"]),
     )
 
 
@@ -1756,18 +1869,23 @@ __all__ = [
     "build_control_point_planform",
     "build_envelope",
     "build_geometry_config",
+    "build_resolved_surface_mesh",
     "compute_geometry_metrics",
     "export_component_geometry_to_pygeo",
     "export_geometry_to_pygeo",
     "GeometryEnvelope",
     "GeometryMetricSet",
+    "GeometryValidationResult",
     "Options",
     "PreparedGeometry",
     "PyGeoExportOptions",
     "PyGeoExportResult",
+    "quintic_c2_transition",
     "ResolvedStation",
+    "ResolvedSurfaceMesh",
     "resolve_anchor_section",
     "resolve_component_geometry",
     "resolve_geometry",
     "WingGeometryConfig",
+    "write_resolved_surface_mesh_npz",
 ]
