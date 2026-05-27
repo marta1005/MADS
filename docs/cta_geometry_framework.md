@@ -133,6 +133,37 @@ El IGES es un adaptador de inspeccion/exportacion:
 outputs/cta_geometry_export/cta.igs
 ```
 
+### Adapter DUST
+
+DUST no recibe directamente la malla CAD fina de `cta_resolved_mesh.npz`. Para
+el metodo de paneles se genera una malla aerodinamica `basic` acondicionada en:
+
+```text
+multiads/solvers/aerodynamics/dust_mesh.py
+```
+
+El adapter generico `write_basic_two_skin_mesh_from_resolved_npz()`:
+
+- lee `upper_vertices`, `lower_vertices`, `span_stations` y `x_airfoil`;
+- remuestrea la geometria a una malla regular de solver;
+- mantiene dos pieles upper/lower separadas;
+- colapsa el borde de salida a una linea comun para que DUST detecte wake;
+- abre numericamente el borde de ataque solo en la malla DUST para evitar
+  aristas upper/lower coincidentes y singularidades del sistema de paneles.
+
+Para el baseline CTA actual se usa:
+
+```text
+n_span_stations = 33
+n_chord_stations = 33
+leading_edge_opening_m = 0.05
+leading_edge_opening_extent = 0.12
+mesh_symmetry = T
+```
+
+Esto no modifica la geometria fuente ni el IGES. Es una discretizacion
+aerodinamica derivada para DUST/wake.
+
 ## Uso
 
 Desde `BWB/`, con el entorno que se esta usando en esta integracion:
@@ -169,6 +200,27 @@ MADS/outputs/cta_geom_doe/cta_geom_doe_design_space.csv
 MADS/outputs/cta_geom_doe/cta_geom_doe_validation_summary.json
 MADS/outputs/cta_geom_doe/cta_geom_doe_manifest.json
 ```
+
+Ejecutar el baseline aerodinamico DUST CTA para `AoA=[0, 5, 10]`:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
+PYTHONPATH=../MADS/src CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+./.venv/bin/python ../MADS/examples/cta_dust_baseline.py
+```
+
+Salidas:
+
+```text
+MADS/outputs/cta_dust_aoa_sweep/aoa_00/
+MADS/outputs/cta_dust_aoa_sweep/aoa_05/
+MADS/outputs/cta_dust_aoa_sweep/aoa_10/
+MADS/outputs/cta_dust_aoa_sweep/cta_dust_aoa_sweep_results.csv
+MADS/outputs/cta_dust_aoa_sweep/cta_dust_aoa_sweep_results.json
+```
+
+Este script no es un DoE. Lanza tres casos sueltos del baseline fijo, uno por
+angulo de ataque.
 
 ## Coherencia Con BWB
 
