@@ -222,6 +222,18 @@ MADS/outputs/cta_dust_aoa_sweep/cta_dust_aoa_sweep_results.json
 Este script no es un DoE. Lanza tres casos sueltos del baseline fijo, uno por
 angulo de ataque.
 
+El postpro DUST tambien escribe visualizacion ParaView del ultimo paso:
+
+```text
+MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization-0040.vtu
+MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization_wpan-0040.vtu
+MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization_wpart-0040.vtu
+```
+
+Abrir en ParaView el `visualization-0040.vtu` para la superficie y, si se quiere
+ver la estela, cargar tambien `visualization_wpan-0040.vtu` y
+`visualization_wpart-0040.vtu`.
+
 ## Coherencia Con BWB
 
 La implementacion MADS se ha comparado contra:

@@ -106,13 +106,25 @@ def run_case(alpha_deg: float, summary: dict[str, Any]) -> dict[str, Any]:
         reference="0",
         components=["cta_wing"],
     )
+    visualization = dl.PostViz(
+        name="visualization",
+        start_res=n_steps,
+        end_res=n_steps,
+        step_res=1,
+        fmt="vtk",
+        wake=True,
+        separate_wake=True,
+        average=False,
+        variables=["cp", "vorticity_vector", "velocity"],
+        components=["all"],
+    )
 
     old_cwd = Path.cwd()
     os.chdir(run_dir)
     try:
         driver.preprocess()
         driver.run()
-        driver.postprocess([loads])
+        driver.postprocess([loads, visualization])
     finally:
         os.chdir(old_cwd)
 
