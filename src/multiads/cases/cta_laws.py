@@ -42,7 +42,6 @@ CTA_PLANFORM_TE_BLEND_FRACTION = 0.24
 CTA_PLANFORM_TE_MIN_LINEAR_CORE_FRACTION = 0.58
 CTA_PLANFORM_SYMMETRY_BLEND_Y = 1.9
 CTA_ROOT_FRONT_BLEND_FRACTION = 0.74
-CTA_OUTER_THICKNESS_XC_WINDOW = (0.15, 0.65)
 
 CTA_PLANFORM_SECTION_Y = np.asarray(
     [0.0, 1.9, 3.765, 5.694, 8.041, 12.508106999999999, 21.505238, 30.502368999999998, 39.4995],
@@ -156,6 +155,25 @@ def build_scalar_interpolant(
     return root_blended
 
 
+def build_positive_interpolant(
+    y_sections: np.ndarray,
+    values: np.ndarray,
+    interpolation: str,
+    linear_start_index: int | None = None,
+    floor: float = 1.0e-8,
+) -> Callable[[float], float]:
+    """Interpolate strictly positive section quantities like the BWB core."""
+
+    positive_values = np.maximum(np.asarray(values, dtype=float), float(floor))
+    log_interpolant = build_scalar_interpolant(
+        y_sections,
+        np.log(positive_values),
+        interpolation,
+        linear_start_index=linear_start_index,
+    )
+    return lambda yy: float(np.exp(log_interpolant(float(yy))))
+
+
 def _build_profile_interpolants(
     anchor_y: np.ndarray,
     anchor_profiles: np.ndarray,
@@ -191,7 +209,7 @@ class CTAResolvedLawSet:
     base_leading_edge_z_fun: Callable[[float], float]
     upper_coeff_interpolants: list[Callable[[float], float]]
     lower_coeff_interpolants: list[Callable[[float], float]]
-    trailing_edge_thickness_fun: Callable[[float], float]
+    trailing_edge_thickness_absolute_fun: Callable[[float], float]
     cst_n1: float
     cst_n2: float
     outer_thickness_fun: Callable[[float], float]
@@ -268,9 +286,14 @@ def _build_cta_law_set(
         interpolation="pchip",
         linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
     )
-    trailing_edge_thickness_fun = build_scalar_interpolant(
+    anchor_chords = np.asarray([float(section.chord) for section in anchor_sections], dtype=float)
+    anchor_trailing_edge_thickness_m = anchor_chords * np.asarray(
+        [section.airfoil.trailing_edge_thickness for section in anchor_sections],
+        dtype=float,
+    )
+    trailing_edge_thickness_absolute_fun = build_positive_interpolant(
         anchor_y,
-        np.asarray([section.airfoil.trailing_edge_thickness for section in anchor_sections], dtype=float),
+        anchor_trailing_edge_thickness_m,
         "pchip",
         linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
     )
@@ -285,7 +308,7 @@ def _build_cta_law_set(
         base_leading_edge_z_fun=base_leading_edge_z_fun,
         upper_coeff_interpolants=upper_coeff_interpolants,
         lower_coeff_interpolants=lower_coeff_interpolants,
-        trailing_edge_thickness_fun=trailing_edge_thickness_fun,
+        trailing_edge_thickness_absolute_fun=trailing_edge_thickness_absolute_fun,
         cst_n1=float(anchor_sections[0].airfoil.n1),
         cst_n2=float(anchor_sections[0].airfoil.n2),
         outer_thickness_fun=outer_thickness_fun,
@@ -393,16 +416,12 @@ def _apply_outer_thickness_target(
     thickness = upper_arr - lower_arr
     te_thickness = float(thickness[-1])
     shape_thickness = thickness - x_arr * te_thickness
-    x_min, x_max = CTA_OUTER_THICKNESS_XC_WINDOW
-    mask = (x_arr >= x_min) & (x_arr <= x_max)
-    if not np.any(mask):
-        return upper_arr, lower_arr
 
     target_tc = float(law_set.outer_thickness_fun(float(y_value)))
 
     def max_tc(scale: float) -> float:
         candidate = scale * shape_thickness + x_arr * te_thickness
-        return float(np.max(candidate[mask]))
+        return float(np.max(candidate))
 
     current_tc = max_tc(1.0)
     if current_tc <= 1.0e-12 or abs(current_tc - target_tc) <= 1.0e-10:
@@ -487,9 +506,11 @@ def build_cta_resolved_station_factory(
     def resolver(sample_y: np.ndarray) -> tuple[ResolvedStation, ...]:
         stations: list[ResolvedStation] = []
         for idx, y_value in enumerate(np.asarray(sample_y, dtype=float)):
+            chord_m = float(law_set.chord_fun(float(y_value)))
             upper_coeffs = tuple(_evaluate_profile_interpolants(law_set.upper_coeff_interpolants, float(y_value)))
             lower_coeffs = tuple(_evaluate_profile_interpolants(law_set.lower_coeff_interpolants, float(y_value)))
-            te_thickness = float(law_set.trailing_edge_thickness_fun(float(y_value)))
+            te_thickness_m = float(law_set.trailing_edge_thickness_absolute_fun(float(y_value)))
+            te_thickness = te_thickness_m / max(chord_m, 1.0e-12)
             upper_z_over_c = evaluate_cst_surface(
                 law_set.x_over_c,
                 upper_coeffs,
@@ -513,7 +534,6 @@ def build_cta_resolved_station_factory(
                 lower_z_over_c=lower_z_over_c,
                 law_set=law_set,
             )
-            chord_m = float(law_set.chord_fun(float(y_value)))
             twist_deg = float(law_set.base_twist_fun(float(y_value)))
             leading_edge_x_m = float(law_set.leading_edge_x_fun(float(y_value)))
             leading_edge_z_m = float(law_set.base_leading_edge_z_fun(float(y_value)))
@@ -553,6 +573,7 @@ def build_cta_resolved_station_factory(
                     metadata={
                         "source": "cta_official_nine_section_laws",
                         "pygeo_te_height_scaled": float(upper_z_over_c[-1] - lower_z_over_c[-1]),
+                        "trailing_edge_thickness_m": te_thickness_m,
                     },
                 )
             )

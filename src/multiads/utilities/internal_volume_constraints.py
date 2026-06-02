@@ -67,6 +67,10 @@ class IndicatorSurfaceSpec:
     def label(self) -> str:
         return f"{self.category}:{self.sub_category}"
 
+    @property
+    def polygon_xy_m(self) -> np.ndarray:
+        return np.asarray(self.vertices_xyz_m[:, :2], dtype=float)
+
 
 @dataclass(frozen=True, slots=True)
 class InternalVolumeConstraintSet:
@@ -89,6 +93,8 @@ class IndicatorSurfaceResult:
     satisfied: bool
     sample_count: int
     invalid_sample_count: int
+    footprint_area_m2: float
+    clearance_volume_m3: float
     worst_margin_m: float
     mean_margin_m: float
     critical_x_m: float
@@ -273,6 +279,19 @@ def _sorted_unique_curve(x_m: np.ndarray, z_m: np.ndarray) -> tuple[np.ndarray, 
     return unique_x, z_unique / np.maximum(counts, 1.0)
 
 
+def _polygon_area_xy(vertices_xy_m: np.ndarray) -> float:
+    xy = np.asarray(vertices_xy_m, dtype=float)
+    x = xy[:, 0]
+    y = xy[:, 1]
+    return float(
+        0.5
+        * abs(
+            np.dot(x, np.roll(y, -1))
+            - np.dot(y, np.roll(x, -1)),
+        )
+    )
+
+
 def _evaluate_indicator_surface(
     surface: IndicatorSurfaceSpec,
     evaluator: GeometryEnvelopeEvaluator,
@@ -300,13 +319,16 @@ def _evaluate_indicator_surface(
 
     critical_idx = int(np.argmin(margin))
     valid_mask = np.isfinite(margin)
+    footprint_area = _polygon_area_xy(surface.polygon_xy_m)
     if np.any(valid_mask):
         worst_margin = float(np.min(margin[valid_mask]))
         mean_margin = float(np.mean(margin[valid_mask]))
+        clearance_volume = mean_margin * footprint_area
         satisfied = bool(np.all(margin[valid_mask] >= 0.0) and not np.any(invalid_mask))
     else:
         worst_margin = float("-inf")
         mean_margin = float("nan")
+        clearance_volume = float("-inf")
         satisfied = False
 
     return IndicatorSurfaceResult(
@@ -317,6 +339,8 @@ def _evaluate_indicator_surface(
         satisfied=satisfied,
         sample_count=int(margin.size),
         invalid_sample_count=int(np.count_nonzero(invalid_mask)),
+        footprint_area_m2=float(footprint_area),
+        clearance_volume_m3=float(clearance_volume),
         worst_margin_m=worst_margin,
         mean_margin_m=mean_margin,
         critical_x_m=float(x_samples[critical_idx]),

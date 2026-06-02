@@ -30,7 +30,7 @@ N_SAMPLES = 1
 DOE_ALGO = "LHS"
 RUN_BASELINE_SAMPLE = True
 TRIANGLE_RESOLUTION = 8
-ENABLE_INTERNAL_BOX_EVALUATION = False
+ENABLE_INTERNAL_BOX_EVALUATION = True
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = REPO_ROOT / "outputs" / "cta_geom_doe"
@@ -228,6 +228,8 @@ if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
             [
                 VariableFloat(f"cta_box_{idx:02d}_{safe_label}_fits", 0.0),
                 VariableFloat(f"cta_box_{idx:02d}_{safe_label}_margin_m", 0.0),
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_footprint_area_m2", 0.0),
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_clearance_volume_m3", 0.0),
             ]
         )
 
@@ -257,6 +259,8 @@ def _evaluate_internal_boxes_from_last_geometry(*_geometry_metrics):  # noqa: AN
             [
                 1.0 if surface_result.satisfied else 0.0,
                 surface_result.worst_margin_m,
+                surface_result.footprint_area_m2,
+                surface_result.clearance_volume_m3,
             ]
         )
     return tuple(outputs)

@@ -260,6 +260,11 @@ _CTA_BASELINE_ABS_TE_S5 = CTA_BASELINE_CHORDS_M["s5"] * CTA_PROFILE_DATA["s5"]["
 CTA_BASELINE_ABSOLUTE_TE_M = {
     "s0": CTA_BASELINE_CHORDS_M["s0"] * CTA_PROFILE_DATA["s0"]["te"],
     "s1": CTA_BASELINE_CHORDS_M["s1"] * CTA_PROFILE_DATA["s0"]["te"],
+    "s1a": (
+        CTA_BASELINE_CHORDS_M["s1"]
+        + CTA_S1A_BLEND * (CTA_BASELINE_CHORDS_M["s2"] - CTA_BASELINE_CHORDS_M["s1"])
+    )
+    * CTA_PROFILE_DATA["s1a"]["te"],
     "s2": CTA_BASELINE_CHORDS_M["s2"] * CTA_PROFILE_DATA["s2"]["te"],
     "s3": CTA_BASELINE_CHORDS_M["s3"] * CTA_PROFILE_DATA["s3"]["te"],
     "s4": _CTA_BASELINE_ABS_TE_S4,
@@ -277,7 +282,7 @@ CTA_CFD_JUNE_14_VARIABLE_INFO = {
     "rspan_midwing": (0.142, 0.13, 0.21),
     "span_wing_m": (31.4585, 28.0, 35.0),
     "sweep_midwing_deg": (34.6, 15.0, 45.0),
-    "sweep_outwing_deg": (24.7, 22.0, 33.0),
+    "sweep_outwing_deg": (24.7, 22.0, 40.0),
     "twist_s4_deg": (0.483, -3.517, 4.483),
     "twist_s4a_deg": (1.381, -2.619, 5.381),
     "twist_s4b_deg": (2.279, -1.721, 6.279),
@@ -393,12 +398,11 @@ def _derive_z_and_twist(
 
 
 def _derive_trailing_edge_thickness(chords: Mapping[str, float]) -> dict[str, float]:
-    s1a_blend = CTA_S1A_BLEND
     te: dict[str, float] = {}
     te["s0"] = CTA_BASELINE_ABSOLUTE_TE_M["s0"] / max(chords["s0"], 1.0e-12)
     te["s1"] = CTA_BASELINE_ABSOLUTE_TE_M["s1"] / max(chords["s1"], 1.0e-12)
     te["s2"] = CTA_BASELINE_ABSOLUTE_TE_M["s2"] / max(chords["s2"], 1.0e-12)
-    te["s1a"] = (1.0 - s1a_blend) * te["s1"] + s1a_blend * te["s2"]
+    te["s1a"] = CTA_BASELINE_ABSOLUTE_TE_M["s1a"] / max(chords["s1a"], 1.0e-12)
     te["s3"] = CTA_BASELINE_ABSOLUTE_TE_M["s3"] / max(chords["s3"], 1.0e-12)
     te["s4"] = CTA_BASELINE_ABSOLUTE_TE_M["s4"] / max(chords["s4"], 1.0e-12)
     te["s5"] = CTA_BASELINE_ABSOLUTE_TE_M["s5"] / max(chords["s5"], 1.0e-12)

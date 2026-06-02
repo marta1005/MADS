@@ -253,13 +253,17 @@ class DUST(BaseSolver):
                 if comp.name == l_comp.name:
                     l_comp.update(comp)  # type: ignore[invalid-argument-type]
 
-        self.options.work_dir.mkdir(parents=True, exist_ok=True)
-        self.run_directory = Path(
-            tempfile.mkdtemp(
-                dir=self.options.work_dir,
-                prefix=self.options.name,
-            ),
-        )
+        if self.options.run_directory is not None:
+            self.run_directory = self.options.run_directory
+            self.run_directory.mkdir(parents=True, exist_ok=True)
+        else:
+            self.options.work_dir.mkdir(parents=True, exist_ok=True)
+            self.run_directory = Path(
+                tempfile.mkdtemp(
+                    dir=self.options.work_dir,
+                    prefix=self.options.name,
+                ),
+            )
 
     def _run(self) -> None:
         if (
@@ -341,36 +345,37 @@ class DUST(BaseSolver):
 
         # Change to local directory and run
         main_dir = Path.cwd()
-        os.chdir(self.run_directory)
+        try:
+            os.chdir(self.run_directory)
 
-        self.driver.postprocess(analyses)
+            self.driver.postprocess(analyses)
 
-        # Map analyises to output variables
-        self._process_loads_results(
-            loads_analyses,
-            self.environment,
-            self.wings,
-            self.propellers,
-            self.outputs_map,
-        )
-        self._process_spanwise_results(
-            span_analyses,
-            self.wings,
-            self.propellers,
-            self.outputs_map,
-        )
-        self._add_thrust_to_spanwise_results(
-            self.propellers,
-            self.outputs_map,
-        )
-        self._process_global_results(
-            self.environment,
-            loads_analyses,
-            self.outputs_map,
-        )
-
-        # Back to main directory
-        os.chdir(main_dir)
+            # Map analyises to output variables
+            self._process_loads_results(
+                loads_analyses,
+                self.environment,
+                self.wings,
+                self.propellers,
+                self.outputs_map,
+            )
+            self._process_spanwise_results(
+                span_analyses,
+                self.wings,
+                self.propellers,
+                self.outputs_map,
+            )
+            self._add_thrust_to_spanwise_results(
+                self.propellers,
+                self.outputs_map,
+            )
+            self._process_global_results(
+                self.environment,
+                loads_analyses,
+                self.outputs_map,
+            )
+        finally:
+            # Back to main directory
+            os.chdir(main_dir)
         if not self.options.keep_run_directory:
             shutil.rmtree(self.run_directory)
 

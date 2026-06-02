@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 from typing_extensions import Self
 
 from multiads import assembly
@@ -79,6 +80,309 @@ def write_polar(polar_data: PolarVariable, file: Path) -> None:
             write_polar_block(f, mach, aoa, np.stack([cm, cm], axis=1))
 
 
+def _cumulative_trapezoid(values: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
+    area = 0.5 * (values[1:] + values[:-1]) * np.diff(coordinates)
+    return np.concatenate(([0.0], np.cumsum(area)))
+
+
+def _normalize_metric(metric: np.ndarray) -> np.ndarray:
+    clean = np.asarray(metric, dtype=float)
+    clean = np.where(np.isfinite(clean), np.maximum(clean, 0.0), 0.0)
+    if clean.size == 0 or float(np.max(clean)) <= 1.0e-15:
+        return np.zeros_like(clean)
+    cap = float(np.percentile(clean, 95.0))
+    if cap <= 1.0e-15:
+        cap = float(np.max(clean))
+    clean = np.clip(clean, 0.0, cap)
+    return clean / max(float(np.max(clean)), 1.0e-15)
+
+
+def _curve_curvature_metric(axis: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
+    axis = np.asarray(axis, dtype=float)
+    coordinates = np.asarray(coordinates, dtype=float)
+    if axis.size < 3:
+        return np.zeros_like(axis)
+    first = np.gradient(coordinates, axis, axis=0, edge_order=1)
+    second = np.gradient(first, axis, axis=0, edge_order=1)
+    scale = np.linalg.norm(first, axis=1)
+    return np.linalg.norm(second, axis=1) / np.maximum(scale * scale, 1.0e-12)
+
+
+def _adaptive_axis_from_density(
+    axis: np.ndarray,
+    density: np.ndarray,
+    count: int,
+) -> np.ndarray:
+    axis = np.asarray(axis, dtype=float)
+    density = np.asarray(density, dtype=float)
+    if int(count) < 2:
+        raise ValueError(f"adaptive axis requires at least 2 stations, got {count}")
+    if axis.ndim != 1 or density.shape != axis.shape:
+        raise ValueError("axis and density must be 1D arrays with the same shape")
+    if np.any(np.diff(axis) <= 0.0):
+        raise ValueError("adaptive axis source coordinates must be strictly increasing")
+
+    density = np.maximum(density, 1.0e-6)
+    cumulative = _cumulative_trapezoid(density, axis)
+    if cumulative[-1] <= 1.0e-15:
+        return np.linspace(float(axis[0]), float(axis[-1]), int(count))
+    targets = np.linspace(0.0, float(cumulative[-1]), int(count))
+    out = np.interp(targets, cumulative, axis)
+    out[0] = float(axis[0])
+    out[-1] = float(axis[-1])
+    return out
+
+
+def _span_curvature_density(
+    upper: np.ndarray,
+    lower: np.ndarray,
+    span: np.ndarray,
+    weight: float,
+) -> np.ndarray:
+    le = 0.5 * (upper[:, 0, :] + lower[:, 0, :])
+    te = 0.5 * (upper[:, -1, :] + lower[:, -1, :])
+    mid = 0.5 * (
+        upper[:, upper.shape[1] // 2, :] + lower[:, lower.shape[1] // 2, :]
+    )
+    upper_env = np.column_stack((span, np.max(upper[:, :, 2], axis=1)))
+    lower_env = np.column_stack((span, np.min(lower[:, :, 2], axis=1)))
+    metric = (
+        _curve_curvature_metric(span, le[:, (0, 2)])
+        + _curve_curvature_metric(span, te[:, (0, 2)])
+        + 0.5 * _curve_curvature_metric(span, mid[:, (0, 2)])
+        + 0.5 * _curve_curvature_metric(span, upper_env)
+        + 0.5 * _curve_curvature_metric(span, lower_env)
+    )
+    return 1.0 + float(weight) * _normalize_metric(metric)
+
+
+def _chord_curvature_density(
+    upper: np.ndarray,
+    lower: np.ndarray,
+    chord: np.ndarray,
+    weight: float,
+    endpoint_weight: float,
+) -> np.ndarray:
+    metric = np.zeros_like(chord, dtype=float)
+    for i_span in range(upper.shape[0]):
+        metric += _curve_curvature_metric(chord, upper[i_span])
+        metric += _curve_curvature_metric(chord, lower[i_span])
+    metric /= max(2 * upper.shape[0], 1)
+
+    endpoint = (
+        np.exp(-0.5 * (chord / 0.055) ** 2)
+        + 0.55 * np.exp(-0.5 * ((1.0 - chord) / 0.075) ** 2)
+    )
+    metric = _normalize_metric(metric) + float(endpoint_weight) * _normalize_metric(endpoint)
+    return 1.0 + float(weight) * _normalize_metric(metric)
+
+
+def _resample_surface(
+    surface: np.ndarray,
+    span: np.ndarray,
+    chord: np.ndarray,
+    span_new: np.ndarray,
+    chord_new: np.ndarray,
+) -> np.ndarray:
+    grid_span, grid_chord = np.meshgrid(span_new, chord_new, indexing="ij")
+    sample_points = np.column_stack((grid_span.ravel(), grid_chord.ravel()))
+    out = np.empty((len(span_new), len(chord_new), 3), dtype=float)
+    for axis in range(3):
+        interpolator = RegularGridInterpolator(
+            (span, chord),
+            surface[:, :, axis],
+            bounds_error=False,
+            fill_value=None,
+        )
+        out[:, :, axis] = interpolator(sample_points).reshape(
+            len(span_new),
+            len(chord_new),
+        )
+    return out
+
+
+def _surface_mesh_diagnostics(rr: np.ndarray, ee: np.ndarray) -> dict[str, float]:
+    quads = rr[ee - 1]
+    area = 0.5 * np.linalg.norm(
+        np.cross(quads[:, 1] - quads[:, 0], quads[:, 2] - quads[:, 0]),
+        axis=1,
+    ) + 0.5 * np.linalg.norm(
+        np.cross(quads[:, 2] - quads[:, 0], quads[:, 3] - quads[:, 0]),
+        axis=1,
+    )
+    edges = np.stack(
+        (
+            np.linalg.norm(quads[:, 1] - quads[:, 0], axis=1),
+            np.linalg.norm(quads[:, 2] - quads[:, 1], axis=1),
+            np.linalg.norm(quads[:, 3] - quads[:, 2], axis=1),
+            np.linalg.norm(quads[:, 0] - quads[:, 3], axis=1),
+        ),
+    )
+    return {
+        "min_panel_area_m2": float(area.min()),
+        "max_panel_area_m2": float(area.max()),
+        "min_edge_length_m": float(edges.min()),
+        "max_edge_length_m": float(edges.max()),
+    }
+
+
+def write_basic_two_skin_mesh_from_resolved_npz(
+    mesh_npz: Path,
+    prefix: Path,
+    *,
+    n_span_stations: int = 33,
+    n_chord_stations: int = 33,
+    span_spacing: str = "uniform",
+    chord_spacing: str = "uniform",
+    span_curvature_weight: float = 4.0,
+    chord_curvature_weight: float = 3.0,
+    chord_endpoint_weight: float = 0.60,
+    leading_edge_opening_m: float = 0.0,
+    leading_edge_opening_chord_fraction: float | None = None,
+    leading_edge_opening_extent: float = 0.12,
+    collapse_trailing_edge: bool = True,
+    mirror_span: bool = False,
+) -> dict[str, Any]:
+    """Write a DUST ``basic`` mesh from a resolved upper/lower surface mesh.
+
+    The synthesis geometry framework resolves CAD-ready upper/lower skins. DUST
+    panel wakes are more robust with a dedicated solver mesh that controls
+    spacing and has a single trailing-edge line. The default keeps the leading
+    edge closed; a small numerical opening can be requested explicitly.
+    """
+
+    data = np.load(mesh_npz)
+    span = np.asarray(data["span_stations"], dtype=float)
+    chord = np.asarray(data["x_airfoil"], dtype=float)
+    upper = np.asarray(data["upper_vertices"], dtype=float)
+    lower = np.asarray(data["lower_vertices"], dtype=float)
+
+    if span_spacing == "uniform":
+        span_new = np.linspace(float(span[0]), float(span[-1]), n_span_stations)
+    elif span_spacing == "curvature":
+        span_density = _span_curvature_density(
+            upper,
+            lower,
+            span,
+            weight=span_curvature_weight,
+        )
+        span_new = _adaptive_axis_from_density(span, span_density, n_span_stations)
+    else:
+        raise ValueError("span_spacing must be 'uniform' or 'curvature'")
+
+    if chord_spacing == "uniform":
+        chord_new = np.linspace(0.0, 1.0, n_chord_stations)
+    elif chord_spacing == "curvature":
+        chord_density = _chord_curvature_density(
+            upper,
+            lower,
+            chord,
+            weight=chord_curvature_weight,
+            endpoint_weight=chord_endpoint_weight,
+        )
+        chord_new = _adaptive_axis_from_density(chord, chord_density, n_chord_stations)
+    else:
+        raise ValueError("chord_spacing must be 'uniform' or 'curvature'")
+
+    upper_solver = _resample_surface(upper, span, chord, span_new, chord_new)
+    lower_solver = _resample_surface(lower, span, chord, span_new, chord_new)
+
+    if collapse_trailing_edge:
+        te_mid = 0.5 * (upper_solver[:, -1, :] + lower_solver[:, -1, :])
+        upper_solver[:, -1, :] = te_mid
+        lower_solver[:, -1, :] = te_mid
+
+    le_shape = np.clip(1.0 - chord_new / leading_edge_opening_extent, 0.0, 1.0) ** 2
+    if leading_edge_opening_chord_fraction is None:
+        opening = np.full(n_span_stations, float(leading_edge_opening_m), dtype=float)
+    else:
+        le_mid = 0.5 * (upper_solver[:, 0, :] + lower_solver[:, 0, :])
+        te_mid = 0.5 * (upper_solver[:, -1, :] + lower_solver[:, -1, :])
+        local_chord = np.linalg.norm(te_mid - le_mid, axis=1)
+        opening = np.minimum(
+            float(leading_edge_opening_m),
+            float(leading_edge_opening_chord_fraction) * local_chord,
+        )
+    upper_solver[:, :, 2] += 0.5 * opening[:, None] * le_shape[None, :]
+    lower_solver[:, :, 2] -= 0.5 * opening[:, None] * le_shape[None, :]
+
+    if mirror_span:
+        mirror_slice = slice(1, None)
+        upper_mirror = upper_solver[mirror_slice][::-1].copy()
+        lower_mirror = lower_solver[mirror_slice][::-1].copy()
+        upper_mirror[:, :, 1] *= -1.0
+        lower_mirror[:, :, 1] *= -1.0
+        upper_solver = np.concatenate((upper_mirror, upper_solver), axis=0)
+        lower_solver = np.concatenate((lower_mirror, lower_solver), axis=0)
+        span_new = np.concatenate((-span_new[mirror_slice][::-1], span_new))
+        opening = np.concatenate((opening[mirror_slice][::-1], opening))
+
+    n_solver_span = int(upper_solver.shape[0])
+    sections = [
+        np.vstack((upper_solver[i_span], lower_solver[i_span]))
+        for i_span in range(n_solver_span)
+    ]
+    rr = np.vstack(sections)
+    n_per_section = int(sections[0].shape[0])
+
+    quads: list[tuple[int, int, int, int]] = []
+    for i_span in range(n_solver_span - 1):
+        cur = i_span * n_per_section
+        nxt = (i_span + 1) * n_per_section
+        for i_chord in range(n_chord_stations - 1):
+            quads.append(
+                (
+                    nxt + i_chord + 1,
+                    cur + i_chord + 1,
+                    cur + i_chord + 2,
+                    nxt + i_chord + 2,
+                ),
+            )
+            lower_i = n_chord_stations + i_chord
+            quads.append(
+                (
+                    cur + lower_i + 1,
+                    nxt + lower_i + 1,
+                    nxt + lower_i + 2,
+                    cur + lower_i + 2,
+                ),
+            )
+
+    ee = np.asarray(quads, dtype=int)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(prefix.with_name(prefix.name + "rr.dat"), rr, fmt="%.10e")
+    np.savetxt(prefix.with_name(prefix.name + "ee.dat"), ee, fmt="%d")
+
+    return {
+        "n_sections": int(n_solver_span),
+        "n_half_span_sections": int(n_span_stations),
+        "n_chord_stations": int(n_chord_stations),
+        "n_points_per_section": int(n_per_section),
+        "n_points": int(rr.shape[0]),
+        "n_elements": int(ee.shape[0]),
+        "span_spacing": span_spacing,
+        "chord_spacing": chord_spacing,
+        "min_span_spacing_m": float(np.min(np.diff(span_new))),
+        "max_span_spacing_m": float(np.max(np.diff(span_new))),
+        "min_chord_spacing": float(np.min(np.diff(chord_new))),
+        "max_chord_spacing": float(np.max(np.diff(chord_new))),
+        "span_curvature_weight": float(span_curvature_weight),
+        "chord_curvature_weight": float(chord_curvature_weight),
+        "leading_edge_opening_m": float(leading_edge_opening_m),
+        "leading_edge_opening_chord_fraction": (
+            None
+            if leading_edge_opening_chord_fraction is None
+            else float(leading_edge_opening_chord_fraction)
+        ),
+        "min_effective_leading_edge_opening_m": float(np.min(opening)),
+        "max_effective_leading_edge_opening_m": float(np.max(opening)),
+        "leading_edge_opening_extent": float(leading_edge_opening_extent),
+        "trailing_edge_collapsed": bool(collapse_trailing_edge),
+        "span_mirrored": bool(mirror_span),
+        **_surface_mesh_diagnostics(rr, ee),
+    }
+
+
 class Options(SolverOptions):
     def __init__(
         self,
@@ -90,6 +394,7 @@ class Options(SolverOptions):
         dust_post: str | Path = "dust_post",
         n_threads: int = 1,
         work_dir: str | Path = ".",
+        run_directory: str | Path | None = None,
         output_dir: str | Path = "output",
         post_dir: str | Path = "post",
         keep_run_directory: bool = False,
@@ -139,6 +444,7 @@ class Options(SolverOptions):
         self.n_threads = n_threads
 
         self.work_dir = Path(work_dir)
+        self.run_directory = None if run_directory is None else Path(run_directory)
         self.output_dir = Path(output_dir)
         self.post_dir = Path(post_dir)
         self.keep_run_directory = keep_run_directory
@@ -1392,6 +1698,7 @@ class Driver:
     def postprocess(self, analyses: Sequence[Post] | None = None) -> None:
         # Create postprocess file
         analyses = analyses or []
+        self.options.post_dir.mkdir(parents=True, exist_ok=True)
         self.write_dust_post(analyses)
 
         # Run `dust_post`

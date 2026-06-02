@@ -33,10 +33,13 @@ No hay logica DUST dentro de `cta_geometry.py`, `cta_geom_doe.py` ni
 | --- | --- |
 | `examples/cta_geometry.py` | Baseline CTA oficial, 14 variables CFD, secciones MADS, export mesh/IGES. |
 | `examples/cta_geom_doe.py` | DoE/baseline GEMSEO sin DUST. Mapea variables de diseno a parametros derivados. |
+| `examples/cta_dust_doe.py` | Campana GEMSEO de 14 variables conectada a DUST mediante el adapter aerodinamico. |
 | `src/multiads/cases/cta_laws.py` | Leyes CTA: planform, CST spanwise, Z/twist, sampling. |
 | `src/multiads/solvers/synthesis/geometry_lib.py` | Core generico: `PreparedGeometry`, planform, mesh resuelto, metricas. |
 | `src/multiads/utilities/pygeo_export.py` | Adaptador pyGeo/IGES desde geometria resuelta. |
-| `src/multiads/solvers/aerodynamics/dust*` | Lugar previsto para DUST. |
+| `src/multiads/solvers/aerodynamics/dust_lib.py` | Primitivas DUST y escritura de malla `basic` desde una geometria resuelta. |
+| `src/multiads/solvers/aerodynamics/dust_geometry.py` | Adapter DUST desde `PreparedGeometry` o `cta_resolved_mesh.npz`. |
+| `src/multiads/utilities/campaign_export.py` | Escritura generica de CSV/XLSX/JSON para campanas; no contiene logica CTA ni DUST. |
 
 ## Variables De Diseno Activas
 
@@ -52,13 +55,32 @@ nombres de variables llevan prefijo `cta_` en GEMSEO.
 | `rspan_midwing` | 0.142 | [0.13, 0.21] | Posicion relativa de S4 desde S3 sobre `Bw`. |
 | `span_wing_m` | 31.4585 | [28.0, 35.0] | Distancia spanwise desde S3 hasta S5. |
 | `sweep_midwing_deg` | 34.6 | [15.0, 45.0] | Sweep S1 medido en la linea de 50% cuerda S3-S4. |
-| `sweep_outwing_deg` | 24.7 | [22.0, 33.0] | Sweep S2 medido en la linea de 25% cuerda S4-S5. |
+| `sweep_outwing_deg` | 24.7 | [22.0, 40.0] | Sweep S2 medido en la linea de 25% cuerda S4-S5. |
 | `twist_s4_deg` | 0.483 | [-3.517, 4.483] | Twist de S4 alrededor del 25% de cuerda. |
 | `twist_s4a_deg` | 1.381 | [-2.619, 5.381] | Twist de S4a alrededor del 25% de cuerda. |
 | `twist_s4b_deg` | 2.279 | [-1.721, 6.279] | Twist de S4b alrededor del 25% de cuerda. |
 | `twist_s5_deg` | 3.177 | [-0.823, 7.177] | Twist de S5 alrededor del 25% de cuerda. |
 | `thickness_s4` | 0.1027 | [0.08, 0.16] | Espesor maximo objetivo de S4. |
 | `thickness_s5` | 0.095 | [0.08, 0.13] | Espesor maximo objetivo de S5. |
+
+Los bounds de twist de la outer wing se han definido como `baseline +/- 4 deg`.
+Los valores baseline son:
+
+```text
+S4  = 0.483 deg
+S5  = 3.177 deg
+S4a = (2*S4 + S5)/3 = 1.381 deg
+S4b = (S4 + 2*S5)/3 = 2.279 deg
+```
+
+Por tanto:
+
+```text
+twist_s4_deg  = [0.483 - 4, 0.483 + 4]
+twist_s4a_deg = [1.381 - 4, 1.381 + 4]
+twist_s4b_deg = [2.279 - 4, 2.279 + 4]
+twist_s5_deg  = [3.177 - 4, 3.177 + 4]
+```
 
 El volumen y packaging no son objetivos de optimizacion. Son checks/constraints
 de factibilidad.
@@ -104,7 +126,7 @@ El transform de espesor exterior conserva:
 
 - camberline,
 - espesor absoluto del TE,
-- objetivo de `t/c` en la ventana `x/c=[0.15, 0.65]`.
+- objetivo de `t/c` medido sobre todo el perfil resuelto.
 
 ### Z / Twist
 
@@ -139,30 +161,56 @@ DUST no recibe directamente la malla CAD fina de `cta_resolved_mesh.npz`. Para
 el metodo de paneles se genera una malla aerodinamica `basic` acondicionada en:
 
 ```text
-multiads/solvers/aerodynamics/dust_mesh.py
+multiads/solvers/aerodynamics/dust_lib.py
 ```
 
-El adapter generico `write_basic_two_skin_mesh_from_resolved_npz()`:
+El remuestreador generico `write_basic_two_skin_mesh_from_resolved_npz()`:
 
 - lee `upper_vertices`, `lower_vertices`, `span_stations` y `x_airfoil`;
-- remuestrea la geometria a una malla regular de solver;
+- remuestrea la geometria a una malla de solver uniforme o adaptativa por
+  curvatura;
+- en modo adaptativo concentra paneles cerca del morro, LE/TE y zonas de alta
+  curvatura, y deja menos paneles donde la geometria es casi lineal;
 - mantiene dos pieles upper/lower separadas;
 - colapsa el borde de salida a una linea comun para que DUST detecte wake;
-- abre numericamente el borde de ataque solo en la malla DUST para evitar
-  aristas upper/lower coincidentes y singularidades del sistema de paneles.
+- por defecto mantiene el borde de ataque cerrado (`leading_edge_opening_m=0.0`);
+- puede abrir numericamente el borde de ataque solo si se pide de forma
+  explicita para un experimento numerico.
+
+El adapter `multiads.solvers.aerodynamics.dust_geometry`:
+
+- recibe una `PreparedGeometry` ya resuelta o un `cta_resolved_mesh.npz`;
+- escribe una copia del mesh resuelto usada por el caso DUST;
+- genera la malla `basic` con spacing adaptativo;
+- construye un `Wing` MADS con `WingOptions(mesh_file=..., mesh_file_type="basic")`;
+- delega la ejecucion en el solver generico `multiads.solvers.aerodynamics.dust.DUST`;
+- usa `dust_lib.py` para configurar `dust_pre`, `dust`, `dust_post`,
+  `PostLoads` y `PostViz`;
+- normaliza `CL`, `CD` y `CM` con el area y MAC de la muestra resuelta;
+- guarda `cta_dust_result.json` dentro de cada caso.
+
+Por tanto, `dust_geometry.py` no es una segunda implementacion de DUST. Es la
+capa de adaptacion entre geometria resuelta y el solver DUST existente. La
+logica de bajo nivel del solver sigue viviendo en `dust.py` y `dust_lib.py`.
 
 Para el baseline CTA actual se usa:
 
 ```text
-n_span_stations = 33
-n_chord_stations = 33
-leading_edge_opening_m = 0.05
-leading_edge_opening_extent = 0.12
-mesh_symmetry = T
+n_span_stations = 49
+n_chord_stations = 45
+span_spacing = curvature
+chord_spacing = curvature
+leading_edge_opening_m = 0.0
+mirror_span = True
 ```
 
 Esto no modifica la geometria fuente ni el IGES. Es una discretizacion
 aerodinamica derivada para DUST/wake.
+
+Las cargas integrales DUST se leen en el `reference_tag=0` usado por el caso.
+Para la campana actual se guarda y normaliza la carga en esos ejes de
+referencia sin proyeccion adicional a ejes viento, porque el objetivo inmediato
+es estabilizar la estela y comparar tendencias de geometria.
 
 ## Uso
 
@@ -201,38 +249,191 @@ MADS/outputs/cta_geom_doe/cta_geom_doe_validation_summary.json
 MADS/outputs/cta_geom_doe/cta_geom_doe_manifest.json
 ```
 
-Ejecutar el baseline aerodinamico DUST CTA para `AoA=[0, 5, 10]`:
+Ejecutar el baseline aerodinamico DUST CTA actual para `AoA=3 deg` con el
+mismo workflow de campana:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
-PYTHONPATH=../MADS/src CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
-./.venv/bin/python ../MADS/examples/cta_dust_baseline.py
+PYTHONPATH=../MADS/src:../MADS/examples \
+CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+./.venv/bin/python ../MADS/examples/cta_dust_doe.py \
+  --baseline-only \
+  --alpha-deg 3.0 \
+  --n-steps 80 \
+  --output-dir ../MADS/outputs/cta_dust_doe_80_baseline_aoa03
 ```
 
 Salidas:
 
 ```text
-MADS/outputs/cta_dust_aoa_sweep/aoa_00/
-MADS/outputs/cta_dust_aoa_sweep/aoa_05/
-MADS/outputs/cta_dust_aoa_sweep/aoa_10/
-MADS/outputs/cta_dust_aoa_sweep/cta_dust_aoa_sweep_results.csv
-MADS/outputs/cta_dust_aoa_sweep/cta_dust_aoa_sweep_results.json
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cta_dust_doe_dataset_flat.csv
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cta_dust_doe_results.xlsx
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/
 ```
 
-Este script no es un DoE. Lanza tres casos sueltos del baseline fijo, uno por
-angulo de ataque.
+`--baseline-only` usa `CustomDOE` con una sola muestra baseline. Asi se valida
+la misma cadena que usara la campana real, pero sin crear un segundo workflow
+ni otra estructura de carpetas.
 
 El postpro DUST tambien escribe visualizacion ParaView del ultimo paso:
 
 ```text
-MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization-0040.vtu
-MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization_wpan-0040.vtu
-MADS/outputs/cta_dust_aoa_sweep/aoa_XX/Postpro/cta_aoa_XX_visualization_wpart-0040.vtu
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization-0080.vtu
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpan-0080.vtu
+MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpart-0080.vtu
 ```
 
-Abrir en ParaView el `visualization-0040.vtu` para la superficie y, si se quiere
-ver la estela, cargar tambien `visualization_wpan-0040.vtu` y
-`visualization_wpart-0040.vtu`.
+Abrir en ParaView el `visualization-0080.vtu` para la superficie y, si se quiere
+ver la estela, cargar tambien `visualization_wpan-0080.vtu` y
+`visualization_wpart-0080.vtu`.
+
+### Campana CFD Con GEMSEO + DUST
+
+La primera campana CFD usa el espacio de 14 variables:
+
+```text
+8 planform:
+  cta_delta_c0_m, cta_delta_c3_m, cta_delta_c5_m,
+  cta_taper_ratio_midwing, cta_rspan_midwing, cta_span_wing_m,
+  cta_sweep_midwing_deg, cta_sweep_outwing_deg
+
+4 twist outer wing:
+  cta_twist_s4_deg, cta_twist_s4a_deg,
+  cta_twist_s4b_deg, cta_twist_s5_deg
+
+2 outer thickness:
+  cta_thickness_s4, cta_thickness_s5
+```
+
+Ejecutar una campana LHS de, por ejemplo, 20 muestras a `AoA=3 deg`:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
+PYTHONPATH=../MADS/src:../MADS/examples \
+CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+./.venv/bin/python ../MADS/examples/cta_dust_doe.py \
+  --n-samples 20 \
+  --alpha-deg 3.0 \
+  --output-dir ../MADS/outputs/cta_dust_doe_20
+```
+
+Por defecto esta campana usa `n_steps = 80`. La ejecucion DUST fisica se
+sobrescribe en un unico directorio:
+
+```text
+MADS/outputs/cta_dust_doe/cases/run/
+```
+
+Esto evita almacenar una carpeta DUST completa por muestra. La historia de la
+campana se conserva en las tablas CSV/XLSX. Si se quiere guardar una carpeta
+por muestra para debug, usar `--store-case-directories`.
+
+Ejecutar solo el baseline dentro del mismo workflow GEMSEO/DUST:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
+PYTHONPATH=../MADS/src:../MADS/examples \
+CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+./.venv/bin/python ../MADS/examples/cta_dust_doe.py \
+  --baseline-only \
+  --alpha-deg 3.0
+```
+
+Opciones principales:
+
+```text
+--n-samples N                 numero de muestras del DOE
+--algo LHS                    algoritmo DOE GEMSEO
+--alpha-deg 3.0               angulo de ataque DUST
+--mesh-span-stations 49       estaciones semiala antes de espejar
+--mesh-chord-stations 45      puntos chordwise por piel
+--span-spacing curvature      mallado spanwise adaptativo
+--chord-spacing curvature     mallado chordwise adaptativo
+--leading-edge-opening-m 0.0  borde de ataque cerrado
+--n-steps 80                  pasos temporales DUST por muestra
+--store-case-directories      guardar sample_XXXX en vez de sobrescribir cases/run
+--no-vtk                      no escribir VTK/ParaView para ahorrar I/O
+--fail-fast                   parar si una muestra falla
+```
+
+Salidas:
+
+```text
+MADS/outputs/cta_dust_doe/cta_dust_doe_dataset.csv
+MADS/outputs/cta_dust_doe/cta_dust_doe_dataset_flat.csv
+MADS/outputs/cta_dust_doe/cta_dust_doe_results.xlsx
+MADS/outputs/cta_dust_doe/cta_dust_doe_design_space.csv
+MADS/outputs/cta_dust_doe/cta_dust_doe_manifest.json
+MADS/outputs/cta_dust_doe/cases/run/
+```
+
+El Excel contiene:
+
+```text
+results       inputs, checks geometricos/packaging, fuerzas, coeficientes y L/D
+design_space  baseline, lower_bound y upper_bound de las 14 variables
+run_settings  AoA, Mach, altitud, n_steps y politica de almacenamiento
+```
+
+En `results`, las columnas `outputs.cta_box_*` son checks por superficie
+indicadora de packaging:
+
+```text
+*_fits                  1 si entra, 0 si falla
+*_margin_m              margen minimo local
+*_footprint_area_m2     area de huella de la superficie indicadora
+*_clearance_volume_m3   margen integrado aproximado = mean_margin * footprint_area
+```
+
+El fichero de packaging actual define superficies indicadoras `upper/lower`,
+no cajas 3D cerradas con volumen nominal propio. Por eso el volumen registrado
+por caja es un volumen de margen/clearance, no un volumen objetivo de
+optimizacion.
+
+La carpeta `cases/run` contiene solo la ultima simulacion DUST ejecutada:
+
+```text
+geometry/cta_resolved_mesh.npz
+geometry/cta_basic_rr.dat
+geometry/cta_basic_ee.dat
+Output/
+post/
+cta_dust_result.json
+```
+
+Igual que en el DoE geometrico, GEMSEO necesita un objetivo tecnico. Aqui se
+usa `cta_dust_failure_code` minimizado solo para registrar si la muestra ha
+fallado (`0 = OK`, `1 = fallo DUST/geometria`). No es una funcion objetivo
+aerodinamica.
+
+### Espesor Outer Wing
+
+Las variables `cta_thickness_s4` y `cta_thickness_s5` son objetivos de espesor
+maximo relativo `t/c` para la outer wing:
+
+```text
+S4  = cta_thickness_s4
+S4a = (2*S4 + S5)/3
+S4b = (S4 + 2*S5)/3
+S5  = cta_thickness_s5
+```
+
+Durante la resolucion de perfiles, MADS calcula la camberline local, separa la
+distribucion de espesor y reescala el perfil completo de esa seccion para que
+el maximo `t/c` de todo el perfil coincida con ese objetivo. CTA no aplica una
+ventana adicional en `x/c` para medir el espesor exterior.
+
+La altura absoluta del borde de salida se mantiene con el contrato baseline. La
+ley interpola el espesor de borde de salida en metros y, en cada estacion, pasa
+a CST el valor relativo:
+
+```text
+te_over_c(y) = te_abs_m(y) / chord_m(y)
+```
+
+Por tanto, cambiar la cuerda o el objetivo de `t/c` exterior no escala
+libremente el borde de salida. Este contrato es de fabricacion, no una variable
+de diseno.
 
 ## Coherencia Con BWB
 
