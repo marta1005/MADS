@@ -1,28 +1,36 @@
 from __future__ import annotations
 
+import copy
+import json
 import os
+import shutil
 import subprocess as sp
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 import numpy as np
+from gemseo.core.discipline import Discipline
 from scipy.interpolate import RegularGridInterpolator
 from typing_extensions import Self
 
 from multiads import assembly
+from multiads.scenario import InnerVariableFloat
 from multiads.scenario.span_loads import SPANLOAD_DEFAULT_NUM_STATIONS
 from multiads.solvers import SolverOptions
 from multiads.solvers.aerodynamics import SectionOptions
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from numpy.typing import NDArray
 
+    from multiads.scenario import BaseVariable
     from multiads.scenario.polars import PolarVariable
+    from multiads.solvers.synthesis.geometry_lib import PreparedGeometry
 
 
 def _log_cmd_output(
@@ -226,6 +234,24 @@ def _surface_mesh_diagnostics(rr: np.ndarray, ee: np.ndarray) -> dict[str, float
     }
 
 
+@dataclass(slots=True)
+class DustMeshSettings:
+    """Settings for a DUST aerodynamic mesh derived from a resolved surface."""
+
+    n_span_stations: int = 49
+    n_chord_stations: int = 45
+    span_spacing: str = "curvature"
+    chord_spacing: str = "curvature"
+    span_curvature_weight: float = 5.0
+    chord_curvature_weight: float = 4.0
+    chord_endpoint_weight: float = 0.60
+    leading_edge_opening_m: float = 0.0
+    leading_edge_opening_chord_fraction: float | None = None
+    leading_edge_opening_extent: float = 0.12
+    collapse_trailing_edge: bool = True
+    mirror_span: bool = True
+
+
 def write_basic_two_skin_mesh_from_resolved_npz(
     mesh_npz: Path,
     prefix: Path,
@@ -381,6 +407,469 @@ def write_basic_two_skin_mesh_from_resolved_npz(
         "span_mirrored": bool(mirror_span),
         **_surface_mesh_diagnostics(rr, ee),
     }
+
+
+@dataclass(slots=True)
+class DustCaseResult:
+    """Scalar result and artifact metadata from one DUST run."""
+
+    alpha_deg: float
+    mach: float
+    altitude_ft: float
+    disa_k: float
+    speed_mps: float
+    rho_kg_m3: float
+    q_pa: float
+    s_ref_m2: float
+    c_ref_m: float
+    fx_reference_n: float
+    fy_reference_n: float
+    fz_reference_n: float
+    mx_reference_nm: float
+    my_reference_nm: float
+    mz_reference_nm: float
+    lift_n: float
+    drag_n: float
+    side_n: float
+    cl: float
+    cd: float
+    cy: float
+    cm: float
+    ld: float
+    run_dir: str
+    mesh_info: dict[str, Any]
+
+    def to_flat_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        mesh_info = data.pop("mesh_info")
+        data.update({f"mesh_{key}": value for key, value in mesh_info.items()})
+        return data
+
+
+def dust_executable(name: str, dust_bin_dir: str | None = None) -> Path:
+    """Resolve a DUST executable from an explicit directory or environment."""
+
+    if dust_bin_dir:
+        return Path(dust_bin_dir) / name
+    if env_bin_dir := os.environ.get("MADS_DUST_BIN_DIR"):
+        return Path(env_bin_dir) / name
+    if env_bin_dir := os.environ.get("CTA_DUST_BIN_DIR"):
+        return Path(env_bin_dir) / name
+    return Path(name)
+
+
+def dust_case_tag(alpha_deg: float) -> str:
+    alpha_int = int(round(float(alpha_deg)))
+    return f"aoa_{alpha_int:02d}" if alpha_int >= 0 else f"aoa_m{abs(alpha_int):02d}"
+
+
+def normalize_reference_loads(
+    force_reference: NDArray[np.float64],
+    moment_reference: NDArray[np.float64],
+    q_inf: float,
+    s_ref_m2: float,
+    c_ref_m: float,
+) -> dict[str, float]:
+    """Normalize DUST reference-axis forces and moments.
+
+    This keeps the current CTA convention: drag is ``-Fx`` and lift is ``Fz``
+    in the DUST reference axes, with no wind-axis projection.
+    """
+
+    drag_n = -float(force_reference[0])
+    side_n = float(force_reference[1])
+    lift_n = float(force_reference[2])
+    return {
+        "lift_n": lift_n,
+        "drag_n": drag_n,
+        "side_n": side_n,
+        "cl": lift_n / (q_inf * s_ref_m2),
+        "cd": drag_n / (q_inf * s_ref_m2),
+        "cy": side_n / (q_inf * s_ref_m2),
+        "cm": float(moment_reference[1]) / (q_inf * s_ref_m2 * c_ref_m),
+        "ld": lift_n / drag_n if abs(drag_n) > 1.0e-14 else float("nan"),
+    }
+
+
+def _n_steps_from_options(options: Options) -> int:
+    if options.dt is not None and options.t_end is not None:
+        duration = float(options.t_end) - float(options.t_start)
+        return max(1, int(round(duration / float(options.dt))))
+    return max(1, int(options.n_wake_panels))
+
+
+def _default_panel_wing_options(
+    *,
+    environment: assembly.Environment,
+    mesh_prefix: Path,
+    n_steps: int,
+    loads_average_window: int = 20,
+) -> WingOptions:
+    loads_start = max(1, int(n_steps) - int(loads_average_window))
+    velocity = np.asarray(environment.velocity, dtype=float)
+    speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+    return WingOptions(
+        discretization_method=WingMethod.PANELS,
+        panel_type=WingPanelType.UNIFORM,
+        num_panels=1,
+        mesh_file=mesh_prefix,
+        mesh_file_type="basic",
+        inner_product_te=0.5,
+        tol_se_wing=1.0e-3,
+        proj_te=True,
+        proj_te_dir="parallel",
+        proj_te_vector=velocity / speed,
+        output_options=OutputOptions(
+            compute_loads=True,
+            loads_start=loads_start,
+            loads_end=int(n_steps),
+            loads_step=1,
+            loads_avg=True,
+            loads_reference="0",
+        ),
+    )
+
+
+def _prepare_panel_wing_options(
+    wing_options: WingOptions | None,
+    *,
+    environment: assembly.Environment,
+    mesh_prefix: Path,
+    n_steps: int,
+) -> WingOptions:
+    if wing_options is None:
+        return _default_panel_wing_options(
+            environment=environment,
+            mesh_prefix=mesh_prefix,
+            n_steps=n_steps,
+        )
+
+    resolved_options = copy.deepcopy(wing_options)
+    resolved_options.mesh_file = mesh_prefix
+    resolved_options.mesh_file_type = "basic"
+    if resolved_options.proj_te_vector is None:
+        velocity = np.asarray(environment.velocity, dtype=float)
+        speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+        resolved_options.proj_te_vector = velocity / speed
+    return resolved_options
+
+
+def run_dust_case_from_resolved_npz(
+    mesh_npz: str | Path,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    clean_run_dir: bool = True,
+    mesh_prefix: str | Path = Path("geometry") / "cta_basic_",
+    component_name: str = "cta_wing",
+    result_file_name: str = "dust_result.json",
+) -> DustCaseResult:
+    """Run one DUST panel case from a solver-independent resolved mesh file."""
+
+    from multiads.solvers.aerodynamics.dust import DUST
+
+    mesh_settings = mesh_settings or DustMeshSettings()
+    case_options = copy.deepcopy(options)
+    if case_options.run_directory is None:
+        msg = "Options.run_directory must be set for resolved-geometry DUST runs."
+        raise ValueError(msg)
+    run_path = Path(case_options.run_directory)
+    case_options.run_directory = run_path
+    case_options.keep_run_directory = True
+    if clean_run_dir and run_path.exists():
+        shutil.rmtree(run_path)
+    (run_path / "geometry").mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.output_dir).mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.post_dir).mkdir(parents=True, exist_ok=True)
+
+    mesh_prefix_path = Path(mesh_prefix)
+    mesh_info = write_basic_two_skin_mesh_from_resolved_npz(
+        Path(mesh_npz),
+        run_path / mesh_prefix_path,
+        n_span_stations=mesh_settings.n_span_stations,
+        n_chord_stations=mesh_settings.n_chord_stations,
+        span_spacing=mesh_settings.span_spacing,
+        chord_spacing=mesh_settings.chord_spacing,
+        span_curvature_weight=mesh_settings.span_curvature_weight,
+        chord_curvature_weight=mesh_settings.chord_curvature_weight,
+        chord_endpoint_weight=mesh_settings.chord_endpoint_weight,
+        leading_edge_opening_m=mesh_settings.leading_edge_opening_m,
+        leading_edge_opening_chord_fraction=mesh_settings.leading_edge_opening_chord_fraction,
+        leading_edge_opening_extent=mesh_settings.leading_edge_opening_extent,
+        collapse_trailing_edge=mesh_settings.collapse_trailing_edge,
+        mirror_span=mesh_settings.mirror_span,
+    )
+
+    env = copy.deepcopy(environment)
+    speed = float(env.speed)
+    n_steps = _n_steps_from_options(case_options)
+    resolved_wing_options = _prepare_panel_wing_options(
+        wing_options,
+        environment=env,
+        mesh_prefix=mesh_prefix_path,
+        n_steps=n_steps,
+    )
+    wing = assembly.Wing(
+        name=component_name,
+        sections=[],
+        spans=[],
+        symmetry=not mesh_settings.mirror_span,
+        options=[resolved_wing_options],
+    )
+
+    dust_solver = DUST(options=case_options)
+    components = dust_solver.parse_variables([env, wing])
+    dust_solver.run(components)
+    dust_solver.compute_output()
+    if dust_solver.outputs_map is None:
+        msg = "DUST did not expose output variables."
+        raise RuntimeError(msg)
+
+    force_reference = np.asarray(
+        dust_solver.outputs_map[f"{component_name}.force"].value,
+        dtype=float,
+    )
+    moment_reference = np.asarray(
+        dust_solver.outputs_map[f"{component_name}.moment"].value,
+        dtype=float,
+    )
+    if not np.all(np.isfinite(force_reference)) or not np.all(np.isfinite(moment_reference)):
+        msg = f"DUST returned non-finite loads for alpha={float(env.alpha):g} deg."
+        raise RuntimeError(msg)
+
+    q_inf = 0.5 * float(env.density) * speed**2
+    loads_norm = normalize_reference_loads(
+        force_reference,
+        moment_reference,
+        q_inf,
+        float(s_ref_m2),
+        float(c_ref_m),
+    )
+    result = DustCaseResult(
+        alpha_deg=float(env.alpha),
+        mach=float(env.mach),
+        altitude_ft=float(env.height / 0.3048),
+        disa_k=float(getattr(env, "disa_k", 0.0)),
+        speed_mps=float(speed),
+        rho_kg_m3=float(env.density),
+        q_pa=float(q_inf),
+        s_ref_m2=float(s_ref_m2),
+        c_ref_m=float(c_ref_m),
+        fx_reference_n=float(force_reference[0]),
+        fy_reference_n=float(force_reference[1]),
+        fz_reference_n=float(force_reference[2]),
+        mx_reference_nm=float(moment_reference[0]),
+        my_reference_nm=float(moment_reference[1]),
+        mz_reference_nm=float(moment_reference[2]),
+        run_dir=str(run_path),
+        mesh_info=mesh_info,
+        **loads_norm,
+    )
+    (run_path / result_file_name).write_text(
+        json.dumps(result.to_flat_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return result
+
+
+def run_dust_case_from_prepared_geometry(
+    geometry: PreparedGeometry,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    result_file_name: str = "dust_result.json",
+) -> DustCaseResult:
+    """Build the resolved surface mesh from geometry and run one DUST case."""
+
+    from multiads.solvers.synthesis.geometry_lib import (
+        build_resolved_surface_mesh,
+        write_resolved_surface_mesh_npz,
+    )
+
+    if options.run_directory is None:
+        msg = "Options.run_directory must be set for resolved-geometry DUST runs."
+        raise ValueError(msg)
+    run_path = Path(options.run_directory)
+    if run_path.exists():
+        shutil.rmtree(run_path)
+    (run_path / "geometry").mkdir(parents=True, exist_ok=True)
+    resolved_mesh_path = run_path / "geometry" / "cta_resolved_mesh.npz"
+    mesh = build_resolved_surface_mesh(geometry)
+    write_resolved_surface_mesh_npz(resolved_mesh_path, mesh)
+    return run_dust_case_from_resolved_npz(
+        resolved_mesh_path,
+        environment=environment,
+        options=options,
+        s_ref_m2=s_ref_m2,
+        c_ref_m=c_ref_m,
+        mesh_settings=mesh_settings,
+        wing_options=wing_options,
+        clean_run_dir=False,
+        result_file_name=result_file_name,
+    )
+
+
+class ResolvedGeometryDustDiscipline(Discipline):
+    """GEMSEO discipline running DUST from an already resolved geometry state."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        geometry_provider: Callable[[], PreparedGeometry | None],
+        metric_inputs: Sequence[BaseVariable],
+        output_dir: str | Path,
+        environment: assembly.Environment,
+        options: Options,
+        wing_options: WingOptions | None = None,
+        mesh_settings: DustMeshSettings | None = None,
+        reference_area_name: str = "cta_wing.planform_area_m2",
+        reference_chord_name: str = "cta_wing.mean_aerodynamic_chord_m",
+        output_prefix: str = "cta_dust",
+        component_name: str = "cta_wing",
+        fail_fast: bool = False,
+        reuse_run_directory: bool = False,
+        run_directory_name: str = "run",
+    ) -> None:
+        super().__init__(name)
+        self.geometry_provider = geometry_provider
+        self.output_dir = Path(output_dir)
+        self.environment = copy.deepcopy(environment)
+        self.options = copy.deepcopy(options)
+        self.wing_options = (
+            copy.deepcopy(wing_options) if wing_options is not None else None
+        )
+        self.mesh_settings = mesh_settings or DustMeshSettings()
+        self.reference_area_name = reference_area_name
+        self.reference_chord_name = reference_chord_name
+        self.output_prefix = str(output_prefix)
+        self.component_name = str(component_name)
+        self.fail_fast = bool(fail_fast)
+        self.reuse_run_directory = bool(reuse_run_directory)
+        self.run_directory_name = str(run_directory_name)
+        self.case_index = 0
+
+        self.input_grammar.update_from_data(
+            {var.name: var.value_np for var in metric_inputs},
+        )
+        self.output_variables = [
+            InnerVariableFloat(f"{self.output_prefix}_success", 1.0),
+            InnerVariableFloat(f"{self.output_prefix}_failure_code", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cl", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cd", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cm", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cy", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_ld", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_lift_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_drag_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_side_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_fx_reference_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_fy_reference_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_fz_reference_n", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_mx_reference_nm", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_my_reference_nm", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_mz_reference_nm", 0.0),
+        ]
+        self.output_grammar.update_from_data(
+            {var.name: var.value_np for var in self.output_variables},
+        )
+
+    def _case_dir(self) -> Path:
+        if self.reuse_run_directory:
+            case_dir = self.output_dir / self.run_directory_name
+            if case_dir.exists():
+                shutil.rmtree(case_dir)
+        else:
+            case_dir = (
+                self.output_dir
+                / f"sample_{self.case_index:04d}_{dust_case_tag(self.environment.alpha)}"
+            )
+        self.case_index += 1
+        return case_dir
+
+    def _run(self, input_data: Mapping[str, NDArray[np.float64]]) -> dict[str, NDArray[np.float64]]:
+        case_dir = self._case_dir()
+
+        try:
+            geometry = self.geometry_provider()
+            if geometry is None:
+                raise RuntimeError("No resolved geometry state is available for DUST.")
+
+            s_ref = float(np.ravel(input_data[self.reference_area_name])[0])
+            c_ref = float(np.ravel(input_data[self.reference_chord_name])[0])
+            case_options = copy.deepcopy(self.options)
+            case_options.run_directory = case_dir
+            case_options.keep_run_directory = True
+            case_wing_options = (
+                None if self.wing_options is None else copy.deepcopy(self.wing_options)
+            )
+            result = run_dust_case_from_prepared_geometry(
+                geometry,
+                environment=self.environment,
+                options=case_options,
+                s_ref_m2=s_ref,
+                c_ref_m=c_ref,
+                mesh_settings=self.mesh_settings,
+                wing_options=case_wing_options,
+                result_file_name=f"{self.output_prefix}_result.json",
+            )
+            values = {
+                f"{self.output_prefix}_success": 1.0,
+                f"{self.output_prefix}_failure_code": 0.0,
+                f"{self.output_prefix}_cl": result.cl,
+                f"{self.output_prefix}_cd": result.cd,
+                f"{self.output_prefix}_cm": result.cm,
+                f"{self.output_prefix}_cy": result.cy,
+                f"{self.output_prefix}_ld": result.ld,
+                f"{self.output_prefix}_lift_n": result.lift_n,
+                f"{self.output_prefix}_drag_n": result.drag_n,
+                f"{self.output_prefix}_side_n": result.side_n,
+                f"{self.output_prefix}_fx_reference_n": result.fx_reference_n,
+                f"{self.output_prefix}_fy_reference_n": result.fy_reference_n,
+                f"{self.output_prefix}_fz_reference_n": result.fz_reference_n,
+                f"{self.output_prefix}_mx_reference_nm": result.mx_reference_nm,
+                f"{self.output_prefix}_my_reference_nm": result.my_reference_nm,
+                f"{self.output_prefix}_mz_reference_nm": result.mz_reference_nm,
+            }
+        except Exception as exc:  # noqa: BLE001
+            if self.fail_fast:
+                raise
+            case_dir.mkdir(parents=True, exist_ok=True)
+            (case_dir / "failure.json").write_text(
+                json.dumps({"error": str(exc)}, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            values = {
+                f"{self.output_prefix}_success": 0.0,
+                f"{self.output_prefix}_failure_code": 1.0,
+                f"{self.output_prefix}_cl": 0.0,
+                f"{self.output_prefix}_cd": 0.0,
+                f"{self.output_prefix}_cm": 0.0,
+                f"{self.output_prefix}_cy": 0.0,
+                f"{self.output_prefix}_ld": 0.0,
+                f"{self.output_prefix}_lift_n": 0.0,
+                f"{self.output_prefix}_drag_n": 0.0,
+                f"{self.output_prefix}_side_n": 0.0,
+                f"{self.output_prefix}_fx_reference_n": 0.0,
+                f"{self.output_prefix}_fy_reference_n": 0.0,
+                f"{self.output_prefix}_fz_reference_n": 0.0,
+                f"{self.output_prefix}_mx_reference_nm": 0.0,
+                f"{self.output_prefix}_my_reference_nm": 0.0,
+                f"{self.output_prefix}_mz_reference_nm": 0.0,
+            }
+
+        return {
+            name: np.asarray([value], dtype=float)
+            for name, value in values.items()
+        }
 
 
 class Options(SolverOptions):

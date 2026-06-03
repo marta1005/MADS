@@ -10,16 +10,23 @@ import numpy as np
 
 import cta_geom_doe as geometry_doe
 import cta_geometry as cta
+from multiads.assembly import Environment
 from multiads.scenario import MADSScenario
 from multiads.utilities.campaign_export import (
     CampaignExportPaths,
     campaign_export_paths,
     write_campaign_results,
 )
-from multiads.solvers.aerodynamics.dust_geometry import (
+from multiads.solvers.aerodynamics.dust_lib import (
     DustMeshSettings,
-    DustRunSettings,
+    Options,
+    OutputOptions,
     ResolvedGeometryDustDiscipline,
+    WingMethod,
+    WingOptions,
+    WingPanelType,
+    dust_case_tag,
+    dust_executable,
 )
 
 
@@ -34,25 +41,88 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "cta_dust_doe"
 
 
-
 def _geometry_provider():
     resolved_wing = cta.disc_geometry.components[0]
     return getattr(resolved_wing, "geometry_state", None)
 
 
-def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDiscipline:
-    run_settings = DustRunSettings(
-        mach=args.mach,
-        altitude_m=args.altitude_ft * 0.3048,
-        disa_k=args.disa_k,
-        alpha_deg=args.alpha_deg,
-        n_steps=args.n_steps,
-        dt=args.dt,
-        n_threads=args.n_threads,
-        n_wake_particles=args.n_wake_particles,
-        write_visualization=not args.no_vtk,
-        dust_bin_dir=args.dust_bin_dir,
+def _build_environment(args: argparse.Namespace) -> Environment:
+    altitude_m = args.altitude_ft * 0.3048
+    probe = Environment(name="env", height=altitude_m, speed=1.0)
+    environment = Environment(
+        name="env",
+        height=altitude_m,
+        speed=args.mach * float(probe.sound_speed),
+        alpha=args.alpha_deg,
     )
+    environment.disa_k = float(args.disa_k)
+    return environment
+
+
+def _build_dust_options(args: argparse.Namespace, environment: Environment) -> Options:
+    n_steps = int(args.n_steps)
+    return Options(
+        name=f"cta_{dust_case_tag(environment.alpha)}",
+        dust_pre=dust_executable("dust_pre", args.dust_bin_dir),
+        dust=dust_executable("dust", args.dust_bin_dir),
+        dust_post=dust_executable("dust_post", args.dust_bin_dir),
+        output_dir=Path("Output"),
+        post_dir=Path("post"),
+        keep_run_directory=True,
+        t_start=0.0,
+        t_end=n_steps * float(args.dt),
+        dt=float(args.dt),
+        dt_out=float(args.dt),
+        output_start=True,
+        n_threads=int(args.n_threads),
+        n_wake_panels=n_steps,
+        n_wake_particles=int(args.n_wake_particles),
+        particles_box_min=np.asarray((-80.0, -90.0, -80.0), dtype=float),
+        particles_box_max=np.asarray((380.0, 90.0, 80.0), dtype=float),
+        penetration_avoidance=False,
+        output_options=OutputOptions(
+            visualization=not args.no_vtk,
+            viz_start=n_steps,
+            viz_end=n_steps,
+            viz_step=1,
+            viz_fmt="vtk",
+            viz_wake=True,
+            viz_separate_wake=True,
+            viz_variables=["cp", "vorticity_vector", "velocity"],
+        ),
+    )
+
+
+def _build_wing_options(args: argparse.Namespace, environment: Environment) -> WingOptions:
+    n_steps = int(args.n_steps)
+    velocity = np.asarray(environment.velocity, dtype=float)
+    speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+    return WingOptions(
+        discretization_method=WingMethod.PANELS,
+        panel_type=WingPanelType.UNIFORM,
+        num_panels=1,
+        mesh_file=Path("geometry") / "cta_basic_",
+        mesh_file_type="basic",
+        inner_product_te=0.5,
+        tol_se_wing=1.0e-3,
+        proj_te=True,
+        proj_te_dir="parallel",
+        proj_te_vector=velocity / speed,
+        output_options=OutputOptions(
+            compute_loads=True,
+            loads_start=max(1, n_steps - 20),
+            loads_end=n_steps,
+            loads_step=1,
+            loads_avg=True,
+            loads_reference="0",
+        ),
+    )
+
+
+def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDiscipline:
+    environment = _build_environment(args)
+    options = _build_dust_options(args, environment)
+    wing_options = _build_wing_options(args, environment)
     mesh_settings = DustMeshSettings(
         n_span_stations=args.mesh_span_stations,
         n_chord_stations=args.mesh_chord_stations,
@@ -68,7 +138,9 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
         geometry_provider=_geometry_provider,
         metric_inputs=geometry_doe.GEOMETRY_METRIC_VARIABLES,
         output_dir=args.output_dir / "cases",
-        run_settings=run_settings,
+        environment=environment,
+        options=options,
+        wing_options=wing_options,
         mesh_settings=mesh_settings,
         fail_fast=args.fail_fast,
         reuse_run_directory=not args.store_case_directories,
@@ -76,7 +148,9 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
     )
 
 
-def build_cta_dust_doe_scenario(args: argparse.Namespace) -> tuple[MADSScenario, ResolvedGeometryDustDiscipline]:
+def build_cta_dust_doe_scenario(
+    args: argparse.Namespace,
+) -> tuple[MADSScenario, ResolvedGeometryDustDiscipline]:
     """Create the GEMSEO DOE scenario for CTA geometry plus DUST."""
 
     dust_discipline = _build_dust_discipline(args)
@@ -166,8 +240,7 @@ def _design_space_rows() -> list[dict[str, float | str]]:
     return rows
 
 
-
-def _run_settings_rows(args: argparse.Namespace) -> list[list[object]]:
+def _analysis_settings_rows(args: argparse.Namespace) -> list[list[object]]:
     return [
         ["key", "value"],
         ["n_steps", int(args.n_steps)],
@@ -179,12 +252,18 @@ def _run_settings_rows(args: argparse.Namespace) -> list[list[object]]:
         ["run_directory", str(args.output_dir / "cases" / args.run_directory_name)],
         [
             "note",
-            "DUST run files are overwritten by default; campaign history is stored in this workbook and CSV files.",
+            (
+                "DUST run files are overwritten by default; campaign history is "
+                "stored in this workbook and CSV files."
+            ),
         ],
     ]
 
 
-def _build_manifest(args: argparse.Namespace, paths: CampaignExportPaths) -> dict[str, object]:
+def _build_manifest(
+    args: argparse.Namespace,
+    paths: CampaignExportPaths,
+) -> dict[str, object]:
     return {
         "purpose": "CTA 14-variable geometry DOE connected to DUST.",
         "architecture": {
@@ -192,7 +271,7 @@ def _build_manifest(args: argparse.Namespace, paths: CampaignExportPaths) -> dic
             "geometry_case": "examples/cta_geometry.py",
             "geometry_mapping": "examples/cta_geom_doe.py::disc_planform_mapping",
             "geometry_core": "multiads.solvers.synthesis.geometry_lib",
-            "dust_adapter": "multiads.solvers.aerodynamics.dust_geometry",
+            "dust_adapter": "multiads.solvers.aerodynamics.dust_lib.ResolvedGeometryDustDiscipline",
             "dust_mesh_writer": "multiads.solvers.aerodynamics.dust_lib.write_basic_two_skin_mesh_from_resolved_npz",
         },
         "algorithm": "CustomDOE" if args.baseline_only else args.algo,
@@ -227,7 +306,9 @@ def _build_manifest(args: argparse.Namespace, paths: CampaignExportPaths) -> dic
             "The script minimizes cta_dust_failure_code only as a technical "
             "execution status; this is not an aerodynamic optimization target."
         ),
-        "design_variables": [variable.name for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES],
+        "design_variables": [
+            variable.name for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES
+        ],
         "outputs": {
             "dataset_csv": str(paths.dataset_csv),
             "flat_dataset_csv": str(paths.flat_dataset_csv),
@@ -240,7 +321,10 @@ def _build_manifest(args: argparse.Namespace, paths: CampaignExportPaths) -> dic
             ),
         },
         "notes": [
-            "DUST receives a derived panel mesh from the resolved geometry, not only section definitions.",
+            (
+                "DUST receives a derived panel mesh from the resolved geometry, "
+                "not only section definitions."
+            ),
             "CL, CD and CM are normalized using the resolved sample area and MAC.",
             "For this debugging/campaign setup, drag is read from the reference axes without additional wind-axis projection.",
         ],
@@ -314,7 +398,7 @@ def main() -> None:
         file_prefix="cta_dust_doe",
         dataset=dataset,
         design_space_rows=_design_space_rows(),
-        run_settings_rows=_run_settings_rows(args),
+        analysis_settings_rows=_analysis_settings_rows(args),
         manifest=manifest,
         paths=export_paths,
     )

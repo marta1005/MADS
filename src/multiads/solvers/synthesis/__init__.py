@@ -27,14 +27,31 @@ from multiads.solvers.synthesis.geometry import (
     ResolvedSurfaceMesh,
     write_resolved_surface_mesh_npz,
 )
+from multiads.solvers.synthesis.spanwise_laws import (
+    ControlPointPlanformLawConfig,
+    build_le_te_planform_law,
+    build_positive_interpolant,
+    build_profile_interpolants,
+    build_scalar_interpolant,
+    cosine_spacing,
+    evaluate_profile_interpolants,
+    scale_thickness_preserving_trailing_edge,
+)
 
 __all__ = [
     "build_control_point_planform",
+    "build_le_te_planform_law",
     "build_envelope",
     "build_geometry_config",
+    "build_positive_interpolant",
+    "build_profile_interpolants",
     "build_resolved_surface_mesh",
+    "build_scalar_interpolant",
     "compute_geometry_metrics",
+    "ControlPointPlanformLawConfig",
+    "cosine_spacing",
     "CSTGeometrySolver",
+    "evaluate_profile_interpolants",
     "GeometryEnvelope",
     "GeometryExportRunResult",
     "GeometryMetricSet",
@@ -52,6 +69,7 @@ __all__ = [
     "resolve_anchor_section",
     "resolve_component_geometry",
     "resolve_geometry",
+    "scale_thickness_preserving_trailing_edge",
     "write_resolved_surface_mesh_npz",
     "WingGeometryConfig",
 ]

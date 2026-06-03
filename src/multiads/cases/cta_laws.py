@@ -14,14 +14,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy.interpolate import PchipInterpolator
 
-from multiads.solvers.synthesis.geometry import (
+from multiads.solvers.synthesis.geometry_lib import (
     ResolvedStation,
     WingGeometryConfig,
-    build_control_point_planform,
-    quintic_c2_transition,
     resolve_anchor_section,
+)
+from multiads.solvers.synthesis.spanwise_laws import (
+    ControlPointPlanformLawConfig,
+    build_le_te_planform_law,
+    build_positive_interpolant,
+    build_profile_interpolants,
+    build_scalar_interpolant,
+    cosine_spacing,
+    evaluate_profile_interpolants,
+    scale_thickness_preserving_trailing_edge,
 )
 from multiads.utilities.cst import evaluate_cst_surface
 
@@ -77,126 +84,21 @@ CTA_PLANFORM_SECTION_CHORD = np.asarray(
 )
 
 
-def cosine_spacing(n: int) -> np.ndarray:
-    beta = np.linspace(0.0, np.pi, int(n))
-    return 0.5 * (1.0 - np.cos(beta))
-
-
-def build_scalar_interpolant(
-    y_sections: np.ndarray,
-    values: np.ndarray,
-    interpolation: str,
-    linear_start_index: int | None = None,
-    root_blend_y: float | None = None,
-) -> Callable[[float], float]:
-    y_sections = np.asarray(y_sections, dtype=float)
-    values = np.asarray(values, dtype=float)
-
-    if linear_start_index is not None and values.size > 2:
-        linear_start_index = int(linear_start_index)
-        if not (1 <= linear_start_index < values.size - 1):
-            msg = (
-                "linear_start_index must lie inside [1, point_count - 2], "
-                f"got {linear_start_index} for {values.size} points"
-            )
-            raise ValueError(msg)
-        prefix_interpolant = build_scalar_interpolant(
-            y_sections[: linear_start_index + 1],
-            values[: linear_start_index + 1],
-            interpolation,
-            linear_start_index=None,
-        )
-        y_linear = y_sections[linear_start_index:]
-        values_linear = values[linear_start_index:]
-
-        def hybrid_interpolant(yy: float) -> float:
-            y_val = float(yy)
-            if y_val <= float(y_sections[linear_start_index]):
-                return float(prefix_interpolant(y_val))
-            return float(np.interp(y_val, y_linear, values_linear))
-
-        interpolant: Callable[[float], float] = hybrid_interpolant
-    else:
-        interpolation_name = interpolation.lower()
-        if interpolation_name == "linear" or values.size == 2:
-            interpolant = lambda yy: float(np.interp(float(yy), y_sections, values))
-        elif interpolation_name == "pchip":
-            pchip = PchipInterpolator(y_sections, values)
-            interpolant = lambda yy: float(pchip(float(yy)))
-        else:
-            msg = f"Unsupported CTA interpolation '{interpolation}'."
-            raise ValueError(msg)
-
-    if root_blend_y is None or float(root_blend_y) <= 1.0e-12:
-        return interpolant
-
-    blend_y = float(root_blend_y)
-    root_value = float(interpolant(0.0))
-    join_value = float(interpolant(blend_y))
-    eps = max(blend_y * 1.0e-4, 1.0e-6)
-    y_left = max(blend_y - eps, 0.0)
-    y_right = blend_y + eps
-    join_slope = float((interpolant(y_right) - interpolant(y_left)) / max(y_right - y_left, 1.0e-12))
-
-    def root_blended(yy: float) -> float:
-        y_val = float(yy)
-        if y_val >= blend_y:
-            return float(interpolant(y_val))
-        return quintic_c2_transition(
-            y=y_val,
-            y0=0.0,
-            y1=blend_y,
-            x0=root_value,
-            x1=join_value,
-            dx0=0.0,
-            dx1=join_slope,
-        )
-
-    return root_blended
-
-
-def build_positive_interpolant(
-    y_sections: np.ndarray,
-    values: np.ndarray,
-    interpolation: str,
-    linear_start_index: int | None = None,
-    floor: float = 1.0e-8,
-) -> Callable[[float], float]:
-    """Interpolate strictly positive section quantities like the BWB core."""
-
-    positive_values = np.maximum(np.asarray(values, dtype=float), float(floor))
-    log_interpolant = build_scalar_interpolant(
-        y_sections,
-        np.log(positive_values),
-        interpolation,
-        linear_start_index=linear_start_index,
-    )
-    return lambda yy: float(np.exp(log_interpolant(float(yy))))
-
-
-def _build_profile_interpolants(
-    anchor_y: np.ndarray,
-    anchor_profiles: np.ndarray,
-    *,
-    interpolation: str,
-    linear_start_index: int | None,
-) -> list[Callable[[float], float]]:
-    return [
-        build_scalar_interpolant(
-            anchor_y,
-            anchor_profiles[:, idx],
-            interpolation,
-            linear_start_index=linear_start_index,
-        )
-        for idx in range(anchor_profiles.shape[1])
-    ]
-
-
-def _evaluate_profile_interpolants(
-    interpolants: list[Callable[[float], float]],
-    y_value: float,
-) -> np.ndarray:
-    return np.asarray([interpolant(float(y_value)) for interpolant in interpolants], dtype=float)
+CTA_PLANFORM_LAW_CONFIG = ControlPointPlanformLawConfig(
+    continuity_order=CTA_PLANFORM_CONTINUITY_ORDER,
+    blend_fraction=CTA_PLANFORM_BLEND_FRACTION,
+    min_linear_core_fraction=CTA_PLANFORM_MIN_LINEAR_CORE_FRACTION,
+    te_blend_fraction=CTA_PLANFORM_TE_BLEND_FRACTION,
+    te_min_linear_core_fraction=CTA_PLANFORM_TE_MIN_LINEAR_CORE_FRACTION,
+    le_linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
+    te_linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
+    le_exact_segments=(),
+    te_exact_segments=(CTA_SECTION_ORDER.index("s3"),),
+    le_spline_bridge=(1, len(CTA_SECTION_ORDER) - 2),
+    te_spline_bridge=None,
+    symmetry_blend_y=CTA_PLANFORM_SYMMETRY_BLEND_Y,
+    body_le_fixed_points=(),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,17 +176,19 @@ def _build_cta_law_set(
 
     anchor_upper_coeffs = np.asarray([section.airfoil.upper_coefficients for section in anchor_sections], dtype=float)
     anchor_lower_coeffs = np.asarray([section.airfoil.lower_coefficients for section in anchor_sections], dtype=float)
-    upper_coeff_interpolants = _build_profile_interpolants(
+    upper_coeff_interpolants = build_profile_interpolants(
         anchor_y,
         anchor_upper_coeffs,
         interpolation="pchip",
         linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
+        label="cta_upper_cst",
     )
-    lower_coeff_interpolants = _build_profile_interpolants(
+    lower_coeff_interpolants = build_profile_interpolants(
         anchor_y,
         anchor_lower_coeffs,
         interpolation="pchip",
         linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
+        label="cta_lower_cst",
     )
     anchor_chords = np.asarray([float(section.chord) for section in anchor_sections], dtype=float)
     anchor_trailing_edge_thickness_m = anchor_chords * np.asarray(
@@ -347,27 +251,11 @@ def build_cta_planform(
     section_y = CTA_PLANFORM_SECTION_Y if section_y is None else np.asarray(section_y, dtype=float)
     section_le_x = CTA_PLANFORM_SECTION_LE_X if section_le_x is None else np.asarray(section_le_x, dtype=float)
     section_chord = CTA_PLANFORM_SECTION_CHORD if section_chord is None else np.asarray(section_chord, dtype=float)
-    leading_edge_points = np.column_stack((section_le_x, section_y))
-    trailing_edge_points = np.column_stack((section_le_x + section_chord, section_y))
-
-    return build_control_point_planform(
-        leading_edge_points=leading_edge_points,
-        trailing_edge_points=trailing_edge_points,
-        root_le_x=float(section_le_x[0]),
-        root_te_x=float(section_le_x[0] + section_chord[0]),
-        continuity_order=CTA_PLANFORM_CONTINUITY_ORDER,
-        blend_fraction=CTA_PLANFORM_BLEND_FRACTION,
-        min_linear_core_fraction=CTA_PLANFORM_MIN_LINEAR_CORE_FRACTION,
-        te_blend_fraction=CTA_PLANFORM_TE_BLEND_FRACTION,
-        te_min_linear_core_fraction=CTA_PLANFORM_TE_MIN_LINEAR_CORE_FRACTION,
-        le_linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
-        te_linear_start_index=CTA_OUTER_LINEAR_START_INDEX,
-        le_exact_segments=(),
-        te_exact_segments=(CTA_SECTION_ORDER.index("s3"),),
-        le_spline_bridge=(1, len(CTA_SECTION_ORDER) - 2),
-        te_spline_bridge=None,
-        symmetry_blend_y=CTA_PLANFORM_SYMMETRY_BLEND_Y,
-        body_le_fixed_points=(),
+    return build_le_te_planform_law(
+        section_y=section_y,
+        section_le_x=section_le_x,
+        section_chord=section_chord,
+        config=CTA_PLANFORM_LAW_CONFIG,
     )
 
 
@@ -409,41 +297,12 @@ def _apply_outer_thickness_target(
     if float(y_value) < law_set.outer_start_y_m - 1.0e-12:
         return upper_z_over_c, lower_z_over_c
 
-    x_arr = np.asarray(x_over_c, dtype=float)
-    upper_arr = np.asarray(upper_z_over_c, dtype=float)
-    lower_arr = np.asarray(lower_z_over_c, dtype=float)
-    camber = 0.5 * (upper_arr + lower_arr)
-    thickness = upper_arr - lower_arr
-    te_thickness = float(thickness[-1])
-    shape_thickness = thickness - x_arr * te_thickness
-
-    target_tc = float(law_set.outer_thickness_fun(float(y_value)))
-
-    def max_tc(scale: float) -> float:
-        candidate = scale * shape_thickness + x_arr * te_thickness
-        return float(np.max(candidate))
-
-    current_tc = max_tc(1.0)
-    if current_tc <= 1.0e-12 or abs(current_tc - target_tc) <= 1.0e-10:
-        return upper_arr, lower_arr
-
-    low = 0.0
-    high = max(2.0, 2.0 * target_tc / max(current_tc, 1.0e-12))
-    for _ in range(32):
-        if max_tc(high) >= target_tc:
-            break
-        high *= 2.0
-    for _ in range(60):
-        mid = 0.5 * (low + high)
-        if max_tc(mid) < target_tc:
-            low = mid
-        else:
-            high = mid
-
-    scale = 0.5 * (low + high)
-    new_thickness = scale * shape_thickness + x_arr * te_thickness
-    new_thickness = np.maximum(new_thickness, 0.0)
-    return camber + 0.5 * new_thickness, camber - 0.5 * new_thickness
+    return scale_thickness_preserving_trailing_edge(
+        x_over_c=x_over_c,
+        upper_z_over_c=upper_z_over_c,
+        lower_z_over_c=lower_z_over_c,
+        target_thickness_over_chord=law_set.outer_thickness_fun(float(y_value)),
+    )
 
 
 def build_cta_span_station_array(
@@ -507,8 +366,8 @@ def build_cta_resolved_station_factory(
         stations: list[ResolvedStation] = []
         for idx, y_value in enumerate(np.asarray(sample_y, dtype=float)):
             chord_m = float(law_set.chord_fun(float(y_value)))
-            upper_coeffs = tuple(_evaluate_profile_interpolants(law_set.upper_coeff_interpolants, float(y_value)))
-            lower_coeffs = tuple(_evaluate_profile_interpolants(law_set.lower_coeff_interpolants, float(y_value)))
+            upper_coeffs = tuple(evaluate_profile_interpolants(law_set.upper_coeff_interpolants, float(y_value)))
+            lower_coeffs = tuple(evaluate_profile_interpolants(law_set.lower_coeff_interpolants, float(y_value)))
             te_thickness_m = float(law_set.trailing_edge_thickness_absolute_fun(float(y_value)))
             te_thickness = te_thickness_m / max(chord_m, 1.0e-12)
             upper_z_over_c = evaluate_cst_surface(

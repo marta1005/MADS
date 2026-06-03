@@ -208,7 +208,7 @@ def write_campaign_results(
     file_prefix: str,
     dataset,
     design_space_rows: list[dict[str, Any]],
-    run_settings_rows: list[list[object]],
+    analysis_settings_rows: list[list[object]],
     manifest: dict[str, Any],
     paths: CampaignExportPaths | None = None,
 ) -> CampaignExportPaths:
@@ -233,7 +233,7 @@ def write_campaign_results(
                     for row in design_space_rows
                 ],
             ],
-            "run_settings": run_settings_rows,
+            "analysis_settings": analysis_settings_rows,
         },
     )
     export_paths.manifest_json.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

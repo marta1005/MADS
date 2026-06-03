@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.interpolate import PchipInterpolator
+from scipy.interpolate import PchipInterpolator, make_interp_spline
 
 from multiads.assembly import AirfoilCST, Section, Span, Wing, flatten_components
 from multiads.solvers import SolverOptions
@@ -541,8 +541,12 @@ def spline_transition(
     support_x = np.asarray((x0 - dx0 * pad, x0, x_mid, x1, x1 + dx1 * pad), dtype=float)
     if np.allclose(support_x, support_x[0], atol=1.0e-12, rtol=1.0e-12):
         return float(support_x[0])
-    curve_class = load_pyspline_curve()
-    return curve_class(x=support_x, s=support_y, k=min(4, support_x.size))
+    spline_degree = min(4, support_x.size - 1)
+    try:
+        curve_class = load_pyspline_curve()
+    except Exception:  # noqa: BLE001
+        return make_interp_spline(support_y, support_x, k=spline_degree)
+    return curve_class(x=support_x, s=support_y, k=spline_degree)
 
 
 def span_transition(y: float, curve: object) -> float:
