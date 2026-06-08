@@ -52,6 +52,157 @@ class Neuralfoil(BaseSolver):
         aoa = self.options.aoa
         self.alphas = aoa if aoa is not None else POLAR_DEFAULT_AOA
 
+    @staticmethod
+    def station_coordinates(station: Any) -> NDArray[np.float64]:
+        """Return normalized airfoil coordinates from a resolved geometry station."""
+
+        order = np.argsort(np.asarray(station.x_over_c, dtype=float))
+        x = np.asarray(station.x_over_c, dtype=float)[order]
+        upper = np.asarray(station.upper_z_over_c, dtype=float)[order]
+        lower = np.asarray(station.lower_z_over_c, dtype=float)[order]
+        upper_coords = np.column_stack((x[::-1], upper[::-1]))
+        lower_coords = np.column_stack((x[1:], lower[1:]))
+        return np.vstack((upper_coords, lower_coords))
+
+    @staticmethod
+    def local_alpha_deg(
+        station: Any,
+        *,
+        global_alpha_deg: float,
+        mode: str = "global-plus-twist",
+    ) -> float:
+        """Return the 2D airfoil angle used for a resolved station."""
+
+        twist = float(getattr(station, "twist_deg", 0.0))
+        if mode == "global":
+            return float(global_alpha_deg)
+        if mode == "global-plus-twist":
+            return float(global_alpha_deg + twist)
+        if mode == "global-minus-twist":
+            return float(global_alpha_deg - twist)
+        msg = f"Unknown profile alpha mode: {mode}"
+        raise ValueError(msg)
+
+    @classmethod
+    def estimate_profile_drag_from_resolved_stations(
+        cls,
+        stations: Sequence[Any],
+        environment: Environment,
+        *,
+        s_ref_m2: float,
+        y_min_m: float = 0.0,
+        alpha_mode: str = "global-plus-twist",
+        model: str = "large",
+        n_crit: float = 9.0,
+        station_stride: int = 1,
+        metric_prefix: str = "neuralfoil",
+    ) -> dict[str, float]:
+        """Estimate an integrated profile-drag contribution from resolved stations.
+
+        This is solver-level postprocessing, not a CTA-specific model. The caller
+        decides which spanwise region is meaningful by setting ``y_min_m`` and
+        the metric prefix used in the returned dictionary.
+        """
+
+        selected = [
+            station
+            for station in stations
+            if float(station.spanwise_y_m) >= max(0.0, float(y_min_m)) - 1.0e-9
+        ]
+        selected = sorted(selected, key=lambda station: float(station.spanwise_y_m))
+        if not selected:
+            return cls.zero_profile_drag_metrics(metric_prefix, y_min_m)
+
+        stride = max(1, int(station_stride))
+        if stride > 1 and len(selected) > 2:
+            sampled = selected[::stride]
+            if sampled[-1] is not selected[-1]:
+                sampled.append(selected[-1])
+            selected = sampled
+
+        y = np.asarray([float(station.spanwise_y_m) for station in selected], dtype=float)
+        chord = np.asarray([float(station.chord_m) for station in selected], dtype=float)
+        speed = float(environment.speed)
+        mach = float(environment.mach)
+        reynolds = speed * chord / float(environment.kin_viscosity)
+
+        cd = np.zeros_like(y)
+        cl = np.zeros_like(y)
+        cm = np.zeros_like(y)
+        alpha_local = np.zeros_like(y)
+        for idx, station in enumerate(selected):
+            alpha_local[idx] = cls.local_alpha_deg(
+                station,
+                global_alpha_deg=float(environment.alpha),
+                mode=alpha_mode,
+            )
+            airfoil = asb.Airfoil(
+                name=f"{station.name}",
+                coordinates=cls.station_coordinates(station),
+            )
+            aero = cls.compute_aero_from_airfoil(
+                airfoil,
+                alphas=float(alpha_local[idx]),
+                mach=mach,
+                reynolds=float(reynolds[idx]),
+                model=model,
+                n_crit=float(n_crit),
+                include_360_deg_effects=True,
+            )
+            cd[idx] = float(np.ravel(aero["CD"])[0])
+            cl[idx] = float(np.ravel(aero["CL"])[0])
+            cm[idx] = float(np.ravel(aero["CM"])[0])
+
+        cd_profile = 2.0 * float(np.trapezoid(cd * chord, y)) / float(s_ref_m2)
+        q_pa = 0.5 * float(environment.density) * speed**2
+        drag_n = q_pa * float(s_ref_m2) * cd_profile
+        return {
+            f"{metric_prefix}_profile_y_min_m": float(y_min_m),
+            f"{metric_prefix}_profile_cd": cd_profile,
+            f"{metric_prefix}_profile_drag_n": drag_n,
+            f"{metric_prefix}_station_count": float(len(selected)),
+            f"{metric_prefix}_section_cd_min": float(np.min(cd)),
+            f"{metric_prefix}_section_cd_mean": float(np.mean(cd)),
+            f"{metric_prefix}_section_cd_max": float(np.max(cd)),
+            f"{metric_prefix}_section_cl_min": float(np.min(cl)),
+            f"{metric_prefix}_section_cl_mean": float(np.mean(cl)),
+            f"{metric_prefix}_section_cl_max": float(np.max(cl)),
+            f"{metric_prefix}_section_cm_mean": float(np.mean(cm)),
+            f"{metric_prefix}_re_min": float(np.min(reynolds)),
+            f"{metric_prefix}_re_mean": float(np.mean(reynolds)),
+            f"{metric_prefix}_re_max": float(np.max(reynolds)),
+            f"{metric_prefix}_alpha_local_min_deg": float(np.min(alpha_local)),
+            f"{metric_prefix}_alpha_local_mean_deg": float(np.mean(alpha_local)),
+            f"{metric_prefix}_alpha_local_max_deg": float(np.max(alpha_local)),
+        }
+
+    @staticmethod
+    def zero_profile_drag_metrics(
+        metric_prefix: str = "neuralfoil",
+        y_min_m: float = 0.0,
+    ) -> dict[str, float]:
+        """Return zero-valued profile-drag metrics with the standard keys."""
+
+        return {
+            f"{metric_prefix}_profile_y_min_m": float(y_min_m),
+            f"{metric_prefix}_profile_cd": 0.0,
+            f"{metric_prefix}_profile_drag_n": 0.0,
+            f"{metric_prefix}_station_count": 0.0,
+            f"{metric_prefix}_section_cd_min": 0.0,
+            f"{metric_prefix}_section_cd_mean": 0.0,
+            f"{metric_prefix}_section_cd_max": 0.0,
+            f"{metric_prefix}_section_cl_min": 0.0,
+            f"{metric_prefix}_section_cl_mean": 0.0,
+            f"{metric_prefix}_section_cl_max": 0.0,
+            f"{metric_prefix}_section_cm_mean": 0.0,
+            f"{metric_prefix}_re_min": 0.0,
+            f"{metric_prefix}_re_mean": 0.0,
+            f"{metric_prefix}_re_max": 0.0,
+            f"{metric_prefix}_alpha_local_min_deg": 0.0,
+            f"{metric_prefix}_alpha_local_mean_deg": 0.0,
+            f"{metric_prefix}_alpha_local_max_deg": 0.0,
+        }
+
     def parse_variables(
         self,
         components: Sequence[MADSComponent],

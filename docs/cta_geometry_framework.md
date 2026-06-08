@@ -164,13 +164,13 @@ quads per surface = 16800
 The resolved mesh is the solver-independent geometry authority:
 
 ```text
-outputs/cta_geometry_export/cta_resolved_mesh.npz
+outputs/CTA_case/export/geometry/cta_resolved_mesh.npz
 ```
 
 The IGES is an inspection/export adapter:
 
 ```text
-outputs/cta_geometry_export/cta.igs
+outputs/CTA_case/export/geometry/cta.igs
 ```
 
 ## DUST Adapter
@@ -233,10 +233,10 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/
 Main outputs:
 
 ```text
-MADS/outputs/cta_geometry_export/cta_resolved_mesh.npz
-MADS/outputs/cta_geometry_export/cta.igs
-MADS/outputs/cta_geometry_export/station_airfoils/
-MADS/outputs/cta_geometry_export/summary.json
+MADS/outputs/CTA_case/export/geometry/cta_resolved_mesh.npz
+MADS/outputs/CTA_case/export/geometry/cta.igs
+MADS/outputs/CTA_case/export/geometry/station_airfoils/
+MADS/outputs/CTA_case/export/geometry/summary.json
 ```
 
 Run the geometry-only baseline DoE/check:
@@ -248,17 +248,17 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/
 Main outputs:
 
 ```text
-MADS/outputs/cta_geom_doe/cta_geom_doe_dataset.csv
-MADS/outputs/cta_geom_doe/cta_geom_doe_dataset_flat.csv
-MADS/outputs/cta_geom_doe/cta_geom_doe_design_space.csv
-MADS/outputs/cta_geom_doe/cta_geom_doe_validation_summary.json
-MADS/outputs/cta_geom_doe/cta_geom_doe_manifest.json
+MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_dataset.csv
+MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_dataset_flat.csv
+MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_design_space.csv
+MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_validation_summary.json
+MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_manifest.json
 ```
 
 Run the current CTA DUST baseline at `AoA = 3 deg` with 70 time steps:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --n-steps 70   --output-dir ../MADS/outputs/cta_dust_doe_70_baseline_aoa03
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --n-steps 70   --output-dir ../MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03
 ```
 
 The latest verified 70-step baseline produced:
@@ -273,17 +273,17 @@ L/D = 13.461696
 Main outputs:
 
 ```text
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_dataset_flat.csv
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_results.xlsx
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cases/run/
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cta_dust_doe_dataset_flat.csv
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cta_dust_doe_results.xlsx
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cases/run/
 ```
 
 ParaView outputs from the last time step:
 
 ```text
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization-0070.vtu
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpan-0070.vtu
-MADS/outputs/cta_dust_doe_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpart-0070.vtu
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization-0070.vtu
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpan-0070.vtu
+MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpart-0070.vtu
 ```
 
 Open `visualization-0070.vtu` for the surface and optionally load `visualization_wpan-0070.vtu` and `visualization_wpart-0070.vtu` for wake inspection.
@@ -309,13 +309,13 @@ The first CFD campaign uses the 14-variable design space:
 Run a 20-sample LHS campaign at `AoA = 3 deg`:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --n-samples 20   --alpha-deg 3.0   --output-dir ../MADS/outputs/cta_dust_doe_20
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --n-samples 20   --alpha-deg 3.0   --output-dir ../MADS/outputs/CTA_case/doe_dust_20
 ```
 
 By default, DUST uses `n_steps = 80` in `cta_dust_doe.py`. The physical DUST run directory is overwritten:
 
 ```text
-MADS/outputs/cta_dust_doe/cases/run/
+MADS/outputs/CTA_case/doe_dust/cases/run/
 ```
 
 This avoids storing a full DUST run directory for every sample. The campaign history is kept in CSV/XLSX tables. Use `--store-case-directories` only when one directory per sample is needed for debugging.
@@ -346,12 +346,12 @@ Main command-line options:
 Campaign outputs:
 
 ```text
-MADS/outputs/cta_dust_doe/cta_dust_doe_dataset.csv
-MADS/outputs/cta_dust_doe/cta_dust_doe_dataset_flat.csv
-MADS/outputs/cta_dust_doe/cta_dust_doe_results.xlsx
-MADS/outputs/cta_dust_doe/cta_dust_doe_design_space.csv
-MADS/outputs/cta_dust_doe/cta_dust_doe_manifest.json
-MADS/outputs/cta_dust_doe/cases/run/
+MADS/outputs/CTA_case/doe_dust/cta_dust_doe_dataset.csv
+MADS/outputs/CTA_case/doe_dust/cta_dust_doe_dataset_flat.csv
+MADS/outputs/CTA_case/doe_dust/cta_dust_doe_results.xlsx
+MADS/outputs/CTA_case/doe_dust/cta_dust_doe_design_space.csv
+MADS/outputs/CTA_case/doe_dust/cta_dust_doe_manifest.json
+MADS/outputs/CTA_case/doe_dust/cases/run/
 ```
 
 The Excel workbook contains:

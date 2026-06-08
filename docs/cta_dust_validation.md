@@ -33,7 +33,7 @@ Resolved mesh comparison:
 
 ```text
 BWB:  /private/tmp/bwb_cta_current/export/cta_resolved_mesh.npz
-MADS: MADS/outputs/cta_geometry_export/cta_resolved_mesh.npz
+MADS: MADS/outputs/CTA_case/export/geometry/cta_resolved_mesh.npz
 
 upper_vertices max_abs = 9.280149981805e-10 m
 lower_vertices max_abs = 9.279697010811e-10 m
@@ -61,17 +61,17 @@ CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
   --baseline-only \
   --alpha-deg 3.0 \
   --n-steps 80 \
-  --output-dir ../MADS/outputs/cta_dust_doe_80_baseline_aoa03
+  --output-dir ../MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03
 ```
 
 Retained output:
 
 ```text
-MADS/outputs/cta_dust_doe_80_baseline_aoa03/cta_dust_doe_dataset_flat.csv
-MADS/outputs/cta_dust_doe_80_baseline_aoa03/cta_dust_doe_results.xlsx
-MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization-0080.vtu
-MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpan-0080.vtu
-MADS/outputs/cta_dust_doe_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpart-0080.vtu
+MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03/cta_dust_doe_dataset_flat.csv
+MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03/cta_dust_doe_results.xlsx
+MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization-0080.vtu
+MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpan-0080.vtu
+MADS/outputs/CTA_case/doe_dust_80_baseline_aoa03/cases/run/post/cta_aoa_03_visualization_wpart-0080.vtu
 ```
 
 Current result after enforcing absolute trailing-edge thickness in the resolved

@@ -19,7 +19,7 @@ from multiads.utilities.cst import evaluate_cst_surface
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "cta_parameter_promo"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "CTA_case" / "videos" / "parameter_promo"
 
 SECTION_ORDER = tuple(cta.CTA_SECTION_ORDER)
 OUTER_SECTIONS = {"s4", "s4a", "s4b", "s5"}

@@ -38,7 +38,7 @@ gemseo.configure_logger(
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "cta_dust_doe"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "CTA_case" / "doe_dust"
 
 
 def _geometry_provider():

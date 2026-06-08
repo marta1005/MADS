@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess as sp
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -24,7 +24,7 @@ from multiads.solvers import SolverOptions
 from multiads.solvers.aerodynamics import SectionOptions
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from numpy.typing import NDArray
 
@@ -250,6 +250,8 @@ class DustMeshSettings:
     leading_edge_opening_extent: float = 0.12
     collapse_trailing_edge: bool = True
     mirror_span: bool = True
+    span_min_y_m: float | None = None
+    span_max_y_m: float | None = None
 
 
 def write_basic_two_skin_mesh_from_resolved_npz(
@@ -530,6 +532,81 @@ def _default_panel_wing_options(
     )
 
 
+def _default_parametric_wing_options(
+    *,
+    environment: assembly.Environment,
+    n_steps: int,
+    n_chord_panels: int,
+    method: WingMethod,
+    loads_average_window: int = 20,
+) -> WingOptions:
+    loads_start = max(1, int(n_steps) - int(loads_average_window))
+    velocity = np.asarray(environment.velocity, dtype=float)
+    speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+    panel_type = None if method is WingMethod.LIFTING_LINE else WingPanelType.UNIFORM
+    num_panels = 0 if method is WingMethod.LIFTING_LINE else max(1, int(n_chord_panels))
+    return WingOptions(
+        discretization_method=method,
+        panel_type=panel_type,
+        num_panels=num_panels,
+        mesh_file=None,
+        mesh_file_type=None,
+        inner_product_te=0.5,
+        tol_se_wing=1.0e-3,
+        proj_te=True,
+        proj_te_dir="parallel",
+        proj_te_vector=velocity / speed,
+        output_options=OutputOptions(
+            compute_loads=True,
+            loads_start=loads_start,
+            loads_end=int(n_steps),
+            loads_step=1,
+            loads_avg=True,
+            loads_reference="0",
+        ),
+    )
+
+
+def _default_parametric_vlm_wing_options(
+    *,
+    environment: assembly.Environment,
+    n_steps: int,
+    n_chord_panels: int,
+    loads_average_window: int = 20,
+) -> WingOptions:
+    return _default_parametric_wing_options(
+        environment=environment,
+        n_steps=n_steps,
+        n_chord_panels=n_chord_panels,
+        method=WingMethod.VORTEX_LATTICE,
+        loads_average_window=loads_average_window,
+    )
+
+
+def _remove_duplicate_dust_output_dirs(run_path: Path, output_dir: Path) -> None:
+    """Remove duplicate DUST output folders such as ``Output 2``.
+
+    Some DUST builds create a numbered sibling when the configured output
+    folder already exists. The configured folder is still required by the DUST
+    executable, so we clean the duplicate after the case has been parsed.
+    """
+
+    output_path = Path(output_dir)
+    if output_path.parent != Path("."):
+        search_dir = run_path / output_path.parent
+        output_name = output_path.name
+    else:
+        search_dir = run_path
+        output_name = output_path.name
+    if not search_dir.exists():
+        return
+
+    duplicate_prefix = f"{output_name} "
+    for candidate in search_dir.iterdir():
+        if candidate.is_dir() and candidate.name.startswith(duplicate_prefix):
+            shutil.rmtree(candidate)
+
+
 def _prepare_panel_wing_options(
     wing_options: WingOptions | None,
     *,
@@ -552,6 +629,256 @@ def _prepare_panel_wing_options(
         speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
         resolved_options.proj_te_vector = velocity / speed
     return resolved_options
+
+
+def _prepare_parametric_wing_options(
+    wing_options: WingOptions | None,
+    *,
+    environment: assembly.Environment,
+    n_steps: int,
+    n_chord_panels: int,
+    method: WingMethod,
+) -> WingOptions:
+    if wing_options is None:
+        return _default_parametric_wing_options(
+            environment=environment,
+            n_steps=n_steps,
+            n_chord_panels=n_chord_panels,
+            method=method,
+        )
+
+    resolved_options = copy.deepcopy(wing_options)
+    resolved_options.method = method
+    if method is WingMethod.LIFTING_LINE:
+        resolved_options.panel_type = None
+        resolved_options.num_panels = 0
+    else:
+        resolved_options.panel_type = resolved_options.panel_type or WingPanelType.UNIFORM
+        resolved_options.num_panels = max(1, int(n_chord_panels))
+    resolved_options.mesh_file = None
+    resolved_options.mesh_file_type = None
+    resolved_options.mesh_definition = ()
+    if resolved_options.proj_te_vector is None:
+        velocity = np.asarray(environment.velocity, dtype=float)
+        speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+        resolved_options.proj_te_vector = velocity / speed
+    return resolved_options
+
+
+def _prepare_parametric_vlm_wing_options(
+    wing_options: WingOptions | None,
+    *,
+    environment: assembly.Environment,
+    n_steps: int,
+    n_chord_panels: int,
+) -> WingOptions:
+    return _prepare_parametric_wing_options(
+        wing_options,
+        environment=environment,
+        n_steps=n_steps,
+        n_chord_panels=n_chord_panels,
+        method=WingMethod.VORTEX_LATTICE,
+    )
+
+
+def _selected_vlm_stations(geometry: PreparedGeometry, n_span_stations: int) -> list[Any]:
+    stations = sorted(
+        geometry.resolved_stations,
+        key=lambda station: float(station.spanwise_y_m),
+    )
+    if len(stations) < 2:
+        msg = "Parametric lifting-surface wing requires at least two resolved stations."
+        raise ValueError(msg)
+    count = min(len(stations), max(2, int(n_span_stations)))
+    indices = np.rint(np.linspace(0, len(stations) - 1, count)).astype(int)
+    unique_indices = []
+    for index in indices:
+        if int(index) not in unique_indices:
+            unique_indices.append(int(index))
+    return [stations[index] for index in unique_indices]
+
+
+def _selected_parametric_stations(
+    geometry: PreparedGeometry,
+    mesh_settings: DustMeshSettings,
+) -> list[Any]:
+    stations = sorted(
+        geometry.resolved_stations,
+        key=lambda station: float(station.spanwise_y_m),
+    )
+    if mesh_settings.span_min_y_m is not None:
+        stations = [
+            station
+            for station in stations
+            if float(station.spanwise_y_m) >= float(mesh_settings.span_min_y_m)
+        ]
+    if mesh_settings.span_max_y_m is not None:
+        stations = [
+            station
+            for station in stations
+            if float(station.spanwise_y_m) <= float(mesh_settings.span_max_y_m)
+        ]
+    if len(stations) < 2:
+        msg = "Parametric lifting-surface wing requires at least two resolved stations."
+        raise ValueError(msg)
+    count = min(len(stations), max(2, int(mesh_settings.n_span_stations)))
+    indices = np.rint(np.linspace(0, len(stations) - 1, count)).astype(int)
+    unique_indices = []
+    for index in indices:
+        if int(index) not in unique_indices:
+            unique_indices.append(int(index))
+    return [stations[index] for index in unique_indices]
+
+
+def _span_panel_counts(stations: Sequence[Any], total_panels: int) -> list[int]:
+    n_spans = len(stations) - 1
+    total = max(n_spans, int(total_panels))
+    y = np.asarray([float(station.spanwise_y_m) for station in stations], dtype=float)
+    dy = np.maximum(np.diff(y), 1.0e-12)
+    raw = total * dy / float(np.sum(dy))
+    counts = np.maximum(1, np.floor(raw).astype(int))
+    while int(np.sum(counts)) < total:
+        remainder = raw - counts
+        counts[int(np.argmax(remainder))] += 1
+    while int(np.sum(counts)) > total:
+        candidates = np.where(counts > 1)[0]
+        if candidates.size == 0:
+            break
+        remainder = raw[candidates] - counts[candidates]
+        counts[int(candidates[np.argmin(remainder)])] -= 1
+    return [int(value) for value in counts]
+
+
+def _station_airfoil_coordinates(station: Any) -> np.ndarray:
+    order = np.argsort(np.asarray(station.x_over_c, dtype=float))
+    x = np.asarray(station.x_over_c, dtype=float)[order]
+    upper = np.asarray(station.upper_z_over_c, dtype=float)[order]
+    lower = np.asarray(station.lower_z_over_c, dtype=float)[order]
+    upper_coords = np.column_stack((x[::-1], upper[::-1]))
+    lower_coords = np.column_stack((x[1:], lower[1:]))
+    return np.vstack((upper_coords, lower_coords))
+
+
+def _write_station_airfoil_dat(station: Any, path: Path) -> None:
+    coords = _station_airfoil_coordinates(station)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write(f"{coords.shape[0]}\n")
+        np.savetxt(stream, coords, fmt="%.10e")
+
+
+def _build_parametric_wing_from_geometry(
+    geometry: PreparedGeometry,
+    run_path: Path,
+    *,
+    component_name: str,
+    mesh_settings: DustMeshSettings,
+    wing_options: WingOptions,
+) -> tuple[assembly.Wing, dict[str, Any]]:
+    stations = _selected_parametric_stations(geometry, mesh_settings)
+    total_span_panels = max(1, int(mesh_settings.n_span_stations) - 1)
+    span_panels = _span_panel_counts(stations, total_span_panels)
+
+    method_label = (
+        "lifting_line"
+        if wing_options.method is WingMethod.LIFTING_LINE
+        else "vlm"
+    )
+    profile_dir = run_path / "geometry" / f"{method_label}_profiles"
+    sections: list[assembly.Section] = []
+    for idx, station in enumerate(stations):
+        path = profile_dir / f"{idx:03d}_{station.name}.dat"
+        _write_station_airfoil_dat(station, path)
+        section_options = (
+            [SectionOptions(polar=True)]
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else []
+        )
+        sections.append(
+            assembly.Section(
+                name=f"{method_label}_{station.name}",
+                airfoil=assembly.AirfoilFile(
+                    name=f"{method_label}_airfoil_{idx:03d}",
+                    filename=path,
+                ),
+                chord=float(station.chord_m),
+                twist=float(station.twist_deg),
+                options=section_options,
+            ),
+        )
+
+    spans: list[assembly.Span] = []
+    sweep_values: list[float] = []
+    dihed_values: list[float] = []
+    for idx, (start, end, panels) in enumerate(zip(stations[:-1], stations[1:], span_panels, strict=True)):
+        dy = float(end.spanwise_y_m) - float(start.spanwise_y_m)
+        dx = float(end.leading_edge_x_m) - float(start.leading_edge_x_m)
+        dz = float(end.leading_edge_z_m) - float(start.leading_edge_z_m)
+        sweep = float(np.degrees(np.arctan2(dx, max(dy, 1.0e-12))))
+        dihed = float(np.degrees(np.arctan2(dz, max(dy, 1.0e-12))))
+        sweep_values.append(sweep)
+        dihed_values.append(dihed)
+        spans.append(
+            assembly.Span(
+                name=f"{method_label}_span_{idx:03d}",
+                length=max(dy, 1.0e-12),
+                sweep=sweep,
+                dihed=dihed,
+                options=[
+                    SpanOptions(
+                        panel_type=SpanPanelType.UNIFORM,
+                        num_panels=int(panels),
+                    ),
+                ],
+            ),
+        )
+
+    wing = assembly.Wing(
+        name=component_name,
+        sections=sections,
+        spans=spans,
+        symmetry=True,
+        offset=np.asarray(
+            [
+                float(stations[0].leading_edge_x_m),
+                float(stations[0].spanwise_y_m),
+                float(stations[0].leading_edge_z_m),
+            ],
+            dtype=float,
+        ),
+        options=[wing_options],
+    )
+    mesh_info = {
+        "surface_type": "parametric_resolved_sections",
+        "parametric_method": str(wing_options.method.name.lower()),
+        "n_sections": int(len(sections)),
+        "n_half_span_sections": int(len(sections)),
+        "n_chord_stations": int(mesh_settings.n_chord_stations),
+        "n_chord_panels": int(max(1, mesh_settings.n_chord_stations - 1)),
+        "n_elements": int(max(1, mesh_settings.n_chord_stations - 1) * sum(span_panels)),
+        "span_spacing": mesh_settings.span_spacing,
+        "chord_spacing": mesh_settings.chord_spacing,
+        "span_mirrored": False,
+        "mesh_symmetry": True,
+        "span_min_y_m": (
+            float(mesh_settings.span_min_y_m)
+            if mesh_settings.span_min_y_m is not None
+            else float(stations[0].spanwise_y_m)
+        ),
+        "span_max_y_m": (
+            float(mesh_settings.span_max_y_m)
+            if mesh_settings.span_max_y_m is not None
+            else float(stations[-1].spanwise_y_m)
+        ),
+        "span_panel_count": int(sum(span_panels)),
+        "span_panel_count_min": int(min(span_panels)),
+        "span_panel_count_max": int(max(span_panels)),
+        "sweep_min_deg": float(np.min(sweep_values)),
+        "sweep_max_deg": float(np.max(sweep_values)),
+        "dihed_min_deg": float(np.min(dihed_values)),
+        "dihed_max_deg": float(np.max(dihed_values)),
+    }
+    return wing, mesh_info
 
 
 def run_dust_case_from_resolved_npz(
@@ -625,6 +952,7 @@ def run_dust_case_from_resolved_npz(
     components = dust_solver.parse_variables([env, wing])
     dust_solver.run(components)
     dust_solver.compute_output()
+    _remove_duplicate_dust_output_dirs(run_path, case_options.output_dir)
     if dust_solver.outputs_map is None:
         msg = "DUST did not expose output variables."
         raise RuntimeError(msg)
@@ -639,6 +967,210 @@ def run_dust_case_from_resolved_npz(
     )
     if not np.all(np.isfinite(force_reference)) or not np.all(np.isfinite(moment_reference)):
         msg = f"DUST returned non-finite loads for alpha={float(env.alpha):g} deg."
+        raise RuntimeError(msg)
+
+    q_inf = 0.5 * float(env.density) * speed**2
+    loads_norm = normalize_reference_loads(
+        force_reference,
+        moment_reference,
+        q_inf,
+        float(s_ref_m2),
+        float(c_ref_m),
+    )
+    result = DustCaseResult(
+        alpha_deg=float(env.alpha),
+        mach=float(env.mach),
+        altitude_ft=float(env.height / 0.3048),
+        disa_k=float(getattr(env, "disa_k", 0.0)),
+        speed_mps=float(speed),
+        rho_kg_m3=float(env.density),
+        q_pa=float(q_inf),
+        s_ref_m2=float(s_ref_m2),
+        c_ref_m=float(c_ref_m),
+        fx_reference_n=float(force_reference[0]),
+        fy_reference_n=float(force_reference[1]),
+        fz_reference_n=float(force_reference[2]),
+        mx_reference_nm=float(moment_reference[0]),
+        my_reference_nm=float(moment_reference[1]),
+        mz_reference_nm=float(moment_reference[2]),
+        run_dir=str(run_path),
+        mesh_info=mesh_info,
+        **loads_norm,
+    )
+    (run_path / result_file_name).write_text(
+        json.dumps(result.to_flat_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return result
+
+
+def run_dust_vlm_case_from_prepared_geometry(
+    geometry: PreparedGeometry,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    clean_run_dir: bool = True,
+    component_name: str = "cta_wing",
+    result_file_name: str = "dust_result.json",
+) -> DustCaseResult:
+    """Run one DUST VLM case from resolved geometry stations.
+
+    The panel runner sends DUST a closed upper/lower-skin mesh. VLM expects a
+    lifting surface, so this runner converts the resolved CTA stations into a
+    parametric DUST wing: airfoil sections, span segments, sweep/dihedral,
+    chordwise panel count and symmetry. No CTA-specific geometry is hardcoded
+    here; the station data comes from the synthesis geometry object.
+    """
+
+    return _run_dust_parametric_case_from_prepared_geometry(
+        geometry,
+        environment=environment,
+        options=options,
+        s_ref_m2=s_ref_m2,
+        c_ref_m=c_ref_m,
+        method=WingMethod.VORTEX_LATTICE,
+        mesh_settings=mesh_settings,
+        wing_options=wing_options,
+        clean_run_dir=clean_run_dir,
+        component_name=component_name,
+        result_file_name=result_file_name,
+        polar_provider=None,
+    )
+
+
+def run_dust_lifting_line_case_from_prepared_geometry(
+    geometry: PreparedGeometry,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    clean_run_dir: bool = True,
+    component_name: str = "cta_wing",
+    result_file_name: str = "dust_result.json",
+    polar_provider: Callable[
+        [assembly.Environment, assembly.Wing, Mapping[str, "PolarVariable"]],
+        None,
+    ]
+    | None = None,
+) -> DustCaseResult:
+    """Run one DUST lifting-line case from resolved geometry stations.
+
+    The geometry is solver-independent: the resolved spanwise stations are
+    converted to a parametric DUST wing and then written with lifting-line
+    elements. This uses the same adapter path as the VLM runner, but changes
+    only the DUST element method.
+    """
+
+    return _run_dust_parametric_case_from_prepared_geometry(
+        geometry,
+        environment=environment,
+        options=options,
+        s_ref_m2=s_ref_m2,
+        c_ref_m=c_ref_m,
+        method=WingMethod.LIFTING_LINE,
+        mesh_settings=mesh_settings,
+        wing_options=wing_options,
+        clean_run_dir=clean_run_dir,
+        component_name=component_name,
+        result_file_name=result_file_name,
+        polar_provider=polar_provider,
+    )
+
+
+def _run_dust_parametric_case_from_prepared_geometry(
+    geometry: PreparedGeometry,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    method: WingMethod,
+    mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    clean_run_dir: bool = True,
+    component_name: str = "cta_wing",
+    result_file_name: str = "dust_result.json",
+    polar_provider: Callable[
+        [assembly.Environment, assembly.Wing, Mapping[str, "PolarVariable"]],
+        None,
+    ]
+    | None = None,
+) -> DustCaseResult:
+    """Run one DUST parametric lifting-surface case from resolved geometry."""
+
+    from multiads.solvers.aerodynamics.dust import DUST
+
+    mesh_settings = mesh_settings or DustMeshSettings(
+        n_span_stations=81,
+        n_chord_stations=21,
+        chord_curvature_weight=3.0,
+        chord_endpoint_weight=0.45,
+    )
+    case_options = copy.deepcopy(options)
+    if case_options.run_directory is None:
+        msg = "Options.run_directory must be set for resolved-geometry DUST runs."
+        raise ValueError(msg)
+    run_path = Path(case_options.run_directory)
+    case_options.run_directory = run_path
+    case_options.keep_run_directory = True
+    if clean_run_dir and run_path.exists():
+        shutil.rmtree(run_path)
+    (run_path / "geometry").mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.output_dir).mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.post_dir).mkdir(parents=True, exist_ok=True)
+
+    env = copy.deepcopy(environment)
+    speed = float(env.speed)
+    n_steps = _n_steps_from_options(case_options)
+    resolved_wing_options = _prepare_parametric_wing_options(
+        wing_options,
+        environment=env,
+        n_steps=n_steps,
+        n_chord_panels=max(1, int(mesh_settings.n_chord_stations) - 1),
+        method=method,
+    )
+    wing, mesh_info = _build_parametric_wing_from_geometry(
+        geometry,
+        run_path,
+        component_name=component_name,
+        mesh_settings=mesh_settings,
+        wing_options=resolved_wing_options,
+    )
+
+    dust_solver = DUST(options=case_options)
+    components = dust_solver.parse_variables([env, wing])
+    if polar_provider is not None:
+        if dust_solver.polars is None:
+            msg = "DUST did not allocate polar inputs for the parametric wing."
+            raise RuntimeError(msg)
+        polar_provider(env, wing, dust_solver.polars)
+    dust_solver.run(components)
+    dust_solver.compute_output()
+    _remove_duplicate_dust_output_dirs(run_path, case_options.output_dir)
+    if dust_solver.outputs_map is None:
+        msg = "DUST did not expose output variables."
+        raise RuntimeError(msg)
+
+    force_reference = np.asarray(
+        dust_solver.outputs_map[f"{component_name}.force"].value,
+        dtype=float,
+    )
+    moment_reference = np.asarray(
+        dust_solver.outputs_map[f"{component_name}.moment"].value,
+        dtype=float,
+    )
+    if not np.all(np.isfinite(force_reference)) or not np.all(np.isfinite(moment_reference)):
+        msg = (
+            f"DUST returned non-finite {method.name.lower()} loads "
+            f"for alpha={float(env.alpha):g} deg."
+        )
         raise RuntimeError(msg)
 
     q_inf = 0.5 * float(env.density) * speed**2

@@ -1,0 +1,239 @@
+CTA/BWB MADS Environment Requirements
+=====================================
+
+1. Required System Tools
+------------------------
+
+A working installation needs:
+
+  Python 3.11
+  C/C++ compiler
+  Fortran compiler, e.g. gfortran
+  CMake
+  Git
+  BLAS/LAPACK implementation, e.g. OpenBLAS, MKL or system BLAS
+  HDF5 development libraries
+  CGNS development libraries, required by DUST builds using CGNS
+  MPI implementation if mpi4py or the local DUST build requires it
+
+The following commands should be available or loaded through modules:
+
+  python
+  python3.11-config
+  pip
+  cmake
+  git
+  gfortran
+
+
+2. Python Virtual Environment
+-----------------------------
+
+Create and activate a Python 3.11 environment:
+
+  python3.11 -m venv <VENV_DIR>
+  source <VENV_DIR>/bin/activate
+  python -m pip install --upgrade pip setuptools wheel
+
+Use this environment consistently for MADS, pyGeo, pyspline and GEMSEO.
+
+
+3. Core Python Packages
+-----------------------
+
+Install the core Python dependencies:
+
+  numpy==2.3.3
+  scipy==1.15.2
+  pandas==2.3.2
+  matplotlib==3.10.6
+  pillow==12.1.1
+  h5py==3.14.0
+  gemseo==6.3.1
+  pydantic==2.11.9
+  pydantic-settings==2.11.0
+  typing_extensions==4.15.0
+  tqdm==4.67.1
+
+Additional packages used by broader MADS/BWB workflows:
+
+  AeroSandbox==4.2.6
+  casadi==3.7.2
+  mdolab-baseclasses==1.8.4
+  mpi4py==4.1.1
+  networkx==3.5
+  pyXDSM==2.3.1
+  seaborn==0.13.2
+  requests==2.32.5
+
+The campaign Excel writer in MADS does not require `openpyxl` or `xlsxwriter`.
+It writes a minimal `.xlsx` file with the Python standard library.
+
+Example installation command:
+
+  python -m pip install \
+    numpy==2.3.3 scipy==1.15.2 pandas==2.3.2 matplotlib==3.10.6 \
+    pillow==12.1.1 h5py==3.14.0 gemseo==6.3.1 \
+    pydantic==2.11.9 pydantic-settings==2.11.0 \
+    typing_extensions==4.15.0 tqdm==4.67.1 \
+    AeroSandbox==4.2.6 casadi==3.7.2 mdolab-baseclasses==1.8.4 \
+    mpi4py==4.1.1 networkx==3.5 pyXDSM==2.3.1 seaborn==0.13.2 \
+    requests==2.32.5
+
+
+4. pyGeo and pySpline
+---------------------
+
+pyGeo is required for IGES export. pyspline is required by pyGeo and must be
+compiled with its native Fortran extension so that `pyspline/libspline.*` is
+available in the active Python environment.
+
+Install pyGeo from source:
+
+  python -m pip install "git+https://github.com/mdolab/pygeo.git"
+
+For pyspline, do not rely on a pure Python install if it does not provide
+`libspline`. A broken pyspline installation commonly fails with:
+
+  ImportError: cannot import name 'libspline' from partially initialized module 'pyspline'
+
+Generic pyspline build procedure:
+
+  git clone https://github.com/mdolab/pyspline.git <PYSPLINE_SRC>
+  cd <PYSPLINE_SRC>
+  cp config/defaults/<MATCHING_CONFIG_FILE>.mk config/config.mk
+
+Edit `config/config.mk` so that it points to the active environment:
+
+  PYTHON        = <VENV_DIR>/bin/python
+  PYTHON-CONFIG = <PATH_TO_PYTHON_3_11_CONFIG>
+  F2PY          = <VENV_DIR>/bin/f2py
+
+Then build and install:
+
+  make
+  python -m pip install --force-reinstall --no-deps --no-build-isolation <PYSPLINE_SRC>
+
+Validation:
+
+  python -c "from pyspline import Curve, Surface, Volume, libspline; from pygeo import pyGeo; print('pyGeo/pyspline OK')"
+
+If this fails on HPC, ask the system administrator to compile pyspline for the
+same Python environment used by MADS.
+
+
+5. DUST
+-------
+
+DUST is not a Python package. It must be compiled separately and made available
+through PATH or through the `--dust-bin-dir` argument used by
+`examples/cta_dust_doe.py`.
+
+Required DUST executables:
+
+  dust_pre
+  dust
+  dust_post
+
+Generic DUST build outline:
+
+  git clone https://public.gitlab.polimi.it/DAER/dust.git <DUST_SRC>
+  cmake \
+    -S <DUST_SRC> \
+    -B <DUST_SRC>/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DWITH_PRECICE=NO \
+    -DCMAKE_INSTALL_PREFIX=<DUST_INSTALL_DIR> \
+    -DCMAKE_PREFIX_PATH=<BLAS_OR_SITE_PREFIX> \
+    -DCGNS_INC=<CGNS_INCLUDE_DIR> \
+    -DCGNS_LIB=<CGNS_LIBRARY_DIR>
+  cmake --build <DUST_SRC>/build --parallel <N_CORES>
+  cmake --install <DUST_SRC>/build
+
+After installation, either add DUST to PATH:
+
+  export PATH=<DUST_INSTALL_DIR>/bin:$PATH
+
+or pass the install directory explicitly:
+
+  python <MADS_ROOT>/examples/cta_dust_doe.py --dust-bin-dir <DUST_INSTALL_DIR>/bin ...
+
+Validation:
+
+  command -v dust_pre
+  command -v dust
+  command -v dust_post
+
+DUST normally reads input files from the current working directory, so `dust`,
+`dust_pre` and `dust_post` may print an input-file error if called without a
+valid DUST case. That still confirms the executable is callable.
+
+
+6. MADS Runtime Environment
+---------------------------
+
+When running examples from a separate BWB working directory, define:
+
+  export PYTHONDONTWRITEBYTECODE=1
+  export MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR>
+  export PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples
+
+Recommended placeholders:
+
+  <MADS_ROOT>                path to the MADS repository
+  <BWB_ROOT>                 path to the BWB repository or working directory
+  <VENV_DIR>                 active Python 3.11 virtual environment
+  <WRITABLE_TEMP_MPL_DIR>    writable temporary Matplotlib cache directory
+  <DUST_INSTALL_DIR>         DUST installation prefix
+
+
+7. Workflow Validation Commands
+-------------------------------
+
+Validate MADS CTA imports:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python -c "import cta_geometry; import cta_geom_doe; import cta_dust_doe; print('MADS CTA imports OK')"
+
+Generate CTA geometry and IGES:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_geometry.py
+
+Run the geometry-only baseline check:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_geom_doe.py
+
+Run CTA + DUST baseline at AoA = 3 deg, 70 time steps:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
+    --baseline-only \
+    --alpha-deg 3.0 \
+    --n-steps 70 \
+    --dust-bin-dir <DUST_INSTALL_DIR>/bin \
+    --output-dir <MADS_ROOT>/outputs/CTA_case/doe_dust_70_baseline_aoa03
+
+Run the VLM convergence study used for the current CTA screening workflow:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_vlm_convergence.py \
+    --dust-bin-dir <DUST_INSTALL_DIR>/bin
+
+The panel convergence script is retained for high-fidelity checks, but it is
+too expensive for the 150-sample screening campaign:
+
+  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
+  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_panel_convergence.py \
+    --dust-bin-dir <DUST_INSTALL_DIR>/bin
+
+The lifting-line script is a diagnostic only for this CTA/BWB geometry. It
+requires airfoil polar data, but even with NeuralFoil-generated polars the
+full centerbody geometry is not a good lifting-line model.

@@ -1,0 +1,67 @@
+{
+  "algorithm": "CustomDOE",
+  "alpha_deg": 3.0,
+  "altitude_ft": 40000.0,
+  "architecture": {
+    "doe_script": "examples/cta_dust_doe.py",
+    "dust_adapter": "multiads.solvers.aerodynamics.dust_lib.ResolvedGeometryDustDiscipline",
+    "dust_mesh_writer": "multiads.solvers.aerodynamics.dust_lib.write_basic_two_skin_mesh_from_resolved_npz",
+    "geometry_case": "examples/cta_geometry.py",
+    "geometry_core": "multiads.solvers.synthesis.geometry_lib",
+    "geometry_mapping": "examples/cta_geom_doe.py::disc_planform_mapping"
+  },
+  "design_variables": [
+    "cta_delta_c0_m",
+    "cta_delta_c3_m",
+    "cta_delta_c5_m",
+    "cta_taper_ratio_midwing",
+    "cta_rspan_midwing",
+    "cta_span_wing_m",
+    "cta_sweep_midwing_deg",
+    "cta_sweep_outwing_deg",
+    "cta_twist_s4_deg",
+    "cta_twist_s4a_deg",
+    "cta_twist_s4b_deg",
+    "cta_twist_s5_deg",
+    "cta_thickness_s4",
+    "cta_thickness_s5"
+  ],
+  "disa_k": 0.0,
+  "dust": {
+    "dt": 0.005,
+    "dust_bin_dir": null,
+    "force_axes": "reference",
+    "n_steps": 70,
+    "n_threads": 6,
+    "n_wake_particles": 100000,
+    "run_directory_name": "run",
+    "store_case_directories": false,
+    "write_visualization": true
+  },
+  "mach": 0.8,
+  "mesh": {
+    "chord_curvature_weight": 4.0,
+    "chord_spacing": "curvature",
+    "chord_stations": 45,
+    "leading_edge_opening_m": 0.0,
+    "mirror_span": true,
+    "span_curvature_weight": 5.0,
+    "span_spacing": "curvature",
+    "span_stations": 49
+  },
+  "n_samples": 1,
+  "notes": [
+    "DUST receives a derived panel mesh from the resolved geometry, not only section definitions.",
+    "CL, CD and CM are normalized using the resolved sample area and MAC.",
+    "For this debugging/campaign setup, drag is read from the reference axes without additional wind-axis projection."
+  ],
+  "objective_note": "GEMSEO requires an objective for DOE scenarios. The script minimizes cta_dust_failure_code only as a technical execution status; this is not an aerodynamic optimization target.",
+  "outputs": {
+    "campaign_workbook_xlsx": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_results.xlsx",
+    "case_directory_policy": "single overwritten directory: /Users/martaarnabatmartin/Desktop/MADS/outputs/cta_dust_doe_70_baseline_aoa03/cases/run",
+    "dataset_csv": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_dataset.csv",
+    "design_space_csv": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_design_space.csv",
+    "flat_dataset_csv": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_dust_doe_70_baseline_aoa03/cta_dust_doe_dataset_flat.csv"
+  },
+  "purpose": "CTA 14-variable geometry DOE connected to DUST."
+}

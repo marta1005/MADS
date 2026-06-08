@@ -1,0 +1,15 @@
+name,baseline,lower_bound,upper_bound
+cta_delta_c0_m,0.0,-2.203,1.797
+cta_delta_c3_m,0.0,-0.927,2.073
+cta_delta_c5_m,0.0,0.0,1.0
+cta_taper_ratio_midwing,0.5578,0.45,0.6
+cta_rspan_midwing,0.142,0.13,0.21
+cta_span_wing_m,31.4585,28.0,35.0
+cta_sweep_midwing_deg,34.6,15.0,45.0
+cta_sweep_outwing_deg,24.7,22.0,40.0
+cta_twist_s4_deg,0.4830000000000001,-3.517,4.483
+cta_twist_s4a_deg,1.3809999999999998,-2.619,5.381
+cta_twist_s4b_deg,2.279,-1.721,6.279
+cta_twist_s5_deg,3.177,-0.823,7.177
+cta_thickness_s4,0.1027,0.08,0.16
+cta_thickness_s5,0.095,0.08,0.13

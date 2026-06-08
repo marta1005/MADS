@@ -785,7 +785,7 @@ def main() -> None:
         raise RuntimeError(msg)
 
     repo_root = Path(__file__).resolve().parents[1]
-    output_dir = repo_root / "outputs" / "cta_geometry_export"
+    output_dir = repo_root / "outputs" / "CTA_case" / "export" / "geometry"
     profiles_dir = output_dir / "station_airfoils"
     mesh_path = output_dir / "cta_resolved_mesh.npz"
 

@@ -1,0 +1,106 @@
+{
+  "artifacts": {
+    "iges": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/cta.igs",
+    "output_dir": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export",
+    "resolved_mesh_npz": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/cta_resolved_mesh.npz",
+    "station_airfoils": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/station_airfoils"
+  },
+  "case": "CTA official nine-section baseline",
+  "design_space": {
+    "cta_delta_c0_m": {
+      "baseline": 0.0,
+      "lower_bound": -2.203,
+      "upper_bound": 1.797
+    },
+    "cta_delta_c3_m": {
+      "baseline": 0.0,
+      "lower_bound": -0.927,
+      "upper_bound": 2.073
+    },
+    "cta_delta_c5_m": {
+      "baseline": 0.0,
+      "lower_bound": 0.0,
+      "upper_bound": 1.0
+    },
+    "cta_rspan_midwing": {
+      "baseline": 0.142,
+      "lower_bound": 0.13,
+      "upper_bound": 0.21
+    },
+    "cta_span_wing_m": {
+      "baseline": 31.4585,
+      "lower_bound": 28.0,
+      "upper_bound": 35.0
+    },
+    "cta_sweep_midwing_deg": {
+      "baseline": 34.6,
+      "lower_bound": 15.0,
+      "upper_bound": 45.0
+    },
+    "cta_sweep_outwing_deg": {
+      "baseline": 24.7,
+      "lower_bound": 22.0,
+      "upper_bound": 40.0
+    },
+    "cta_taper_ratio_midwing": {
+      "baseline": 0.5578,
+      "lower_bound": 0.45,
+      "upper_bound": 0.6
+    },
+    "cta_thickness_s4": {
+      "baseline": 0.1027,
+      "lower_bound": 0.08,
+      "upper_bound": 0.16
+    },
+    "cta_thickness_s5": {
+      "baseline": 0.095,
+      "lower_bound": 0.08,
+      "upper_bound": 0.13
+    },
+    "cta_twist_s4_deg": {
+      "baseline": 0.483,
+      "lower_bound": -3.517,
+      "upper_bound": 4.483
+    },
+    "cta_twist_s4a_deg": {
+      "baseline": 1.381,
+      "lower_bound": -2.619,
+      "upper_bound": 5.381
+    },
+    "cta_twist_s4b_deg": {
+      "baseline": 2.279,
+      "lower_bound": -1.721,
+      "upper_bound": 6.279
+    },
+    "cta_twist_s5_deg": {
+      "baseline": 3.177,
+      "lower_bound": -0.823,
+      "upper_bound": 7.177
+    }
+  },
+  "export_outputs": {
+    "cta_wing.pygeo_iges_written": 1.0,
+    "cta_wing.pygeo_profile_count": 71.0,
+    "cta_wing.pygeo_station_count": 71.0,
+    "cta_wing.pygeo_surface_count": 5.0
+  },
+  "geometry_outputs": {
+    "cta_wing.enclosed_volume_m3": 1925.4690692506967,
+    "cta_wing.mean_aerodynamic_chord_m": 23.73850003297025,
+    "cta_wing.planform_area_m2": 845.2577127880719,
+    "cta_wing.root_chord_m": 41.203,
+    "cta_wing.span_m": 78.999,
+    "cta_wing.tip_chord_m": 0.7999999999999972
+  },
+  "section_order": [
+    "s0",
+    "s1",
+    "s1a",
+    "s2",
+    "s3",
+    "s4",
+    "s4a",
+    "s4b",
+    "s5"
+  ]
+}

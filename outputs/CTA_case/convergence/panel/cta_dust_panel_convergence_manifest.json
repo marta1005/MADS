@@ -1,0 +1,49 @@
+{
+  "alpha_deg": 3.0,
+  "altitude_ft": 40000.0,
+  "case_policy": "DUST run directory is overwritten; metrics are accumulated in CSV/XLSX outputs.",
+  "cases": [
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 50
+    },
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 60
+    },
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 70
+    },
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 80
+    },
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 100
+    },
+    {
+      "mesh_chord_stations": 45,
+      "mesh_span_stations": 49,
+      "n_steps": 120
+    }
+  ],
+  "disa_k": 0.0,
+  "dt": 0.005,
+  "force_history_saved": true,
+  "loads_average_window": 20,
+  "mach": 0.8,
+  "method": "DUST panels",
+  "outputs": {
+    "force_history_csv": "cta_dust_panel_convergence_force_history.csv",
+    "results_csv": "cta_dust_panel_convergence_results.csv",
+    "workbook": "cta_dust_panel_convergence_results.xlsx"
+  },
+  "purpose": "CTA DUST panel-method convergence study on the fixed baseline geometry."
+}
