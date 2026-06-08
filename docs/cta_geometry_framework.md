@@ -255,12 +255,18 @@ For convenience, the same runtime variables can be configured from the MADS
 repository root with:
 
 ```bash
-source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin
+source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin [EXTRA_LIBRARY_DIR ...]
 ```
 
 This sets `MADS_ROOT`, `PYTHONDONTWRITEBYTECODE`, `MPLCONFIGDIR`,
 `PYTHONPATH`, `MADS_DUST_BIN_DIR`, and `I_MPI_FABRICS=shm` for local/serial
-geometry and DUST checks.
+geometry and DUST checks. It also adds `<DUST_INSTALL_DIR>/lib` to
+`LD_LIBRARY_PATH` when present. If DUST requires additional shared libraries
+such as HDF5, pass their library directories after the DUST bin directory:
+
+```bash
+source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin <HDF5_INSTALL_DIR>/lib
+```
 
 Generate the baseline CTA geometry and IGES:
 

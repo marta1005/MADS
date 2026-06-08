@@ -186,14 +186,25 @@ When running examples from a separate BWB working directory, define:
 For convenience, MADS also provides a shell helper. From the MADS repository
 root, source it so that the variables remain in the current terminal:
 
-  source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin
+  source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin [EXTRA_LIBRARY_DIR ...]
 
 This sets `MADS_ROOT`, `PYTHONDONTWRITEBYTECODE`, `MPLCONFIGDIR`,
 `PYTHONPATH`, `MADS_DUST_BIN_DIR`, and a serial-safe `I_MPI_FABRICS=shm`
-default for local geometry/DUST checks. If DUST is already in PATH, the DUST
-argument can be omitted:
+default for local geometry/DUST checks. It also prepends
+`<DUST_INSTALL_DIR>/lib` to `LD_LIBRARY_PATH` when that directory exists. Extra
+library directories can be passed after the DUST bin directory, for example:
+
+  source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin <HDF5_INSTALL_DIR>/lib
+
+If DUST is already in PATH, the DUST argument can be omitted:
 
   source scripts/setup_cta_env.sh
+
+If DUST starts but fails with a missing shared library such as
+`libhdf5.so.310`, find the HDF5 library directory and either pass it as an
+extra argument or export it manually:
+
+  export LD_LIBRARY_PATH=<HDF5_INSTALL_DIR>/lib:$LD_LIBRARY_PATH
 
 Recommended placeholders:
 
