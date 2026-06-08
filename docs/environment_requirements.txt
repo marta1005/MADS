@@ -154,6 +154,10 @@ After installation, either add DUST to PATH:
 
   export PATH=<DUST_INSTALL_DIR>/bin:$PATH
 
+or define the MADS-specific DUST executable directory:
+
+  export MADS_DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
+
 or pass the install directory explicitly:
 
   python <MADS_ROOT>/examples/cta_dust_doe.py --dust-bin-dir <DUST_INSTALL_DIR>/bin ...
@@ -177,6 +181,7 @@ When running examples from a separate BWB working directory, define:
   export PYTHONDONTWRITEBYTECODE=1
   export MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR>
   export PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples
+  export MADS_DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
 
 Recommended placeholders:
 

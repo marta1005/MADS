@@ -205,6 +205,27 @@ The adapter `multiads.solvers.aerodynamics.dust_lib.ResolvedGeometryDustDiscipli
 
 There is no second DUST geometry module. The bridge between resolved geometry and the existing DUST solver lives in `dust_lib.py`.
 
+DUST executable resolution is centralized in `multiads.solvers.aerodynamics.dust_lib.dust_executable()` and follows this priority:
+
+```text
+1. explicit script option: --dust-bin-dir <DUST_INSTALL_DIR>/bin
+2. environment variable: MADS_DUST_BIN_DIR
+3. legacy environment variable: CTA_DUST_BIN_DIR
+4. system PATH: dust_pre, dust, dust_post
+```
+
+For reproducible runs on the office/HPC machine, prefer either:
+
+```bash
+export MADS_DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
+```
+
+or pass the path explicitly in each command:
+
+```bash
+--dust-bin-dir <DUST_INSTALL_DIR>/bin
+```
+
 For the current CTA baseline, the DUST mesh uses:
 
 ```text
@@ -222,7 +243,13 @@ Integral DUST loads are read in the case reference axes. In the current campaign
 
 ## Usage
 
-The commands below assume the working directory is `BWB/` and that the shared environment is available as `./.venv`. DUST is expected to be in the environment `PATH` through `dust_pre`, `dust` and `dust_post`.
+The commands below assume the working directory is `BWB/` and that the shared environment is available as `./.venv`. DUST can be found either through `MADS_DUST_BIN_DIR`, through `--dust-bin-dir`, or through the system `PATH`.
+
+Recommended shell setup:
+
+```bash
+export MADS_DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
+```
 
 Generate the baseline CTA geometry and IGES:
 
@@ -258,7 +285,7 @@ MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_manifest.json
 Run the current CTA DUST baseline at `AoA = 3 deg` with 70 time steps:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --n-steps 70   --output-dir ../MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --n-steps 70   --dust-bin-dir "$MADS_DUST_BIN_DIR"   --output-dir ../MADS/outputs/CTA_case/doe_dust_70_baseline_aoa03
 ```
 
 The latest verified 70-step baseline produced:
@@ -309,7 +336,7 @@ The first CFD campaign uses the 14-variable design space:
 Run a 20-sample LHS campaign at `AoA = 3 deg`:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --n-samples 20   --alpha-deg 3.0   --output-dir ../MADS/outputs/CTA_case/doe_dust_20
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --n-samples 20   --alpha-deg 3.0   --dust-bin-dir "$MADS_DUST_BIN_DIR"   --output-dir ../MADS/outputs/CTA_case/doe_dust_20
 ```
 
 By default, DUST uses `n_steps = 80` in `cta_dust_doe.py`. The physical DUST run directory is overwritten:
@@ -323,7 +350,7 @@ This avoids storing a full DUST run directory for every sample. The campaign his
 Run only the baseline within the same GEMSEO/DUST workflow:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --dust-bin-dir "$MADS_DUST_BIN_DIR"
 ```
 
 Main command-line options:

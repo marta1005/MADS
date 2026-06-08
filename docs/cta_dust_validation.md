@@ -56,7 +56,7 @@ Current command:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
 PYTHONPATH=../MADS/src:../MADS/examples \
-CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+MADS_DUST_BIN_DIR=/path/to/dust-install/bin \
 ./.venv/bin/python ../MADS/examples/cta_dust_doe.py \
   --baseline-only \
   --alpha-deg 3.0 \
@@ -95,7 +95,7 @@ equivalent is `examples/cta_dust_doe.py --baseline-only`.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl \
 PYTHONPATH=../MADS/src:../MADS/examples \
-CTA_DUST_BIN_DIR=/path/to/dust-install/bin \
+MADS_DUST_BIN_DIR=/path/to/dust-install/bin \
 ./.venv/bin/python ../MADS/examples/cta_dust_doe.py \
   --baseline-only \
   --alpha-deg 5.0 \
