@@ -251,6 +251,17 @@ Recommended shell setup:
 export MADS_DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
 ```
 
+For convenience, the same runtime variables can be configured from the MADS
+repository root with:
+
+```bash
+source scripts/setup_cta_env.sh <DUST_INSTALL_DIR>/bin
+```
+
+This sets `MADS_ROOT`, `PYTHONDONTWRITEBYTECODE`, `MPLCONFIGDIR`,
+`PYTHONPATH`, `MADS_DUST_BIN_DIR`, and `I_MPI_FABRICS=shm` for local/serial
+geometry and DUST checks.
+
 Generate the baseline CTA geometry and IGES:
 
 ```bash
