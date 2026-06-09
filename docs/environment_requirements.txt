@@ -236,16 +236,63 @@ Run the geometry-only baseline check:
   PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
   <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_geom_doe.py
 
-Run CTA + DUST baseline at AoA = 3 deg, 70 time steps:
+Run CTA + DUST-VLM baseline at AoA = 3 deg, 150 time steps:
 
   PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
   PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
   <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
     --baseline-only \
+    --dust-method vlm \
     --alpha-deg 3.0 \
-    --n-steps 70 \
+    --n-steps 150 \
+    --mesh-span-stations 21 \
+    --mesh-chord-stations 21 \
     --dust-bin-dir <DUST_INSTALL_DIR>/bin \
-    --output-dir <MADS_ROOT>/outputs/CTA_case/doe_dust_70_baseline_aoa03
+    --no-vtk \
+    --output-dir <MADS_ROOT>/outputs/CTA_case/datasets/baseline_vlm_150_aoa03
+
+Generate a fixed DOE sample table for a campaign:
+
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_generate_doe_samples.py \
+    --method sobol \
+    --n-samples 5000 \
+    --seed 17 \
+    --output-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+
+Run a serial shard of 50 samples from that table:
+
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
+    --samples-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv \
+    --sample-start 0 \
+    --sample-count 50 \
+    --dust-method vlm \
+    --alpha-deg 3.0 \
+    --n-steps 150 \
+    --mesh-span-stations 21 \
+    --mesh-chord-stations 21 \
+    --n-threads 1 \
+    --dust-bin-dir <DUST_INSTALL_DIR>/bin \
+    --no-vtk \
+    --output-dir <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000
+
+Run the same campaign with SLURM arrays:
+
+  cd <MADS_ROOT>
+  mkdir -p outputs/CTA_case/datasets/slurm_logs
+  export DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
+  export DUST_LIB_DIR=<OPTIONAL_EXTRA_DUST_OR_HDF5_LIB_DIR>
+  export VENV_DIR=<VENV_DIR>
+  export SAMPLES_CSV=outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+  export CAMPAIGN_ROOT=outputs/CTA_case/datasets/campaign_001_exploration
+  export CASES_PER_WORKER=50
+  export DUST_THREADS=1
+  export N_STEPS=150
+  sbatch --array=0-99 scripts/slurm_cta_dust_vlm_shards.sh
+
+Merge finished shards into one flat CSV:
+
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_merge_dust_shards.py \
+    --campaign-root <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration
 
 Run the VLM convergence study used for the current CTA screening workflow:
 

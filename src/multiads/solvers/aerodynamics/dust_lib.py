@@ -1343,16 +1343,36 @@ class ResolvedGeometryDustDiscipline(Discipline):
             case_wing_options = (
                 None if self.wing_options is None else copy.deepcopy(self.wing_options)
             )
-            result = run_dust_case_from_prepared_geometry(
-                geometry,
-                environment=self.environment,
-                options=case_options,
-                s_ref_m2=s_ref,
-                c_ref_m=c_ref,
-                mesh_settings=self.mesh_settings,
-                wing_options=case_wing_options,
-                result_file_name=f"{self.output_prefix}_result.json",
-            )
+            wing_method = None if case_wing_options is None else case_wing_options.method
+            if wing_method is WingMethod.VORTEX_LATTICE:
+                result = run_dust_vlm_case_from_prepared_geometry(
+                    geometry,
+                    environment=self.environment,
+                    options=case_options,
+                    s_ref_m2=s_ref,
+                    c_ref_m=c_ref,
+                    mesh_settings=self.mesh_settings,
+                    wing_options=case_wing_options,
+                    result_file_name=f"{self.output_prefix}_result.json",
+                )
+            elif wing_method is WingMethod.LIFTING_LINE:
+                msg = (
+                    "ResolvedGeometryDustDiscipline cannot run lifting-line cases "
+                    "without a section polar provider. Use the dedicated lifting-line "
+                    "convergence script when polar coupling is required."
+                )
+                raise RuntimeError(msg)
+            else:
+                result = run_dust_case_from_prepared_geometry(
+                    geometry,
+                    environment=self.environment,
+                    options=case_options,
+                    s_ref_m2=s_ref,
+                    c_ref_m=c_ref,
+                    mesh_settings=self.mesh_settings,
+                    wing_options=case_wing_options,
+                    result_file_name=f"{self.output_prefix}_result.json",
+                )
             values = {
                 f"{self.output_prefix}_success": 1.0,
                 f"{self.output_prefix}_failure_code": 0.0,

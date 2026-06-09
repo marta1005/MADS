@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import shutil
 from pathlib import Path
@@ -39,6 +40,7 @@ gemseo.configure_logger(
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "CTA_case" / "doe_dust"
+SUPPORTED_DUST_METHODS = ("vlm", "panels")
 
 
 def _geometry_provider():
@@ -97,6 +99,27 @@ def _build_wing_options(args: argparse.Namespace, environment: Environment) -> W
     n_steps = int(args.n_steps)
     velocity = np.asarray(environment.velocity, dtype=float)
     speed = max(float(np.linalg.norm(velocity)), 1.0e-14)
+    output_options = OutputOptions(
+        compute_loads=True,
+        loads_start=max(1, n_steps - 20),
+        loads_end=n_steps,
+        loads_step=1,
+        loads_avg=True,
+        loads_reference="0",
+    )
+    if args.dust_method == "vlm":
+        return WingOptions(
+            discretization_method=WingMethod.VORTEX_LATTICE,
+            panel_type=WingPanelType.UNIFORM,
+            num_panels=max(1, int(args.mesh_chord_stations) - 1),
+            inner_product_te=0.5,
+            tol_se_wing=1.0e-3,
+            proj_te=True,
+            proj_te_dir="parallel",
+            proj_te_vector=velocity / speed,
+            output_options=output_options,
+        )
+
     return WingOptions(
         discretization_method=WingMethod.PANELS,
         panel_type=WingPanelType.UNIFORM,
@@ -108,14 +131,7 @@ def _build_wing_options(args: argparse.Namespace, environment: Environment) -> W
         proj_te=True,
         proj_te_dir="parallel",
         proj_te_vector=velocity / speed,
-        output_options=OutputOptions(
-            compute_loads=True,
-            loads_start=max(1, n_steps - 20),
-            loads_end=n_steps,
-            loads_step=1,
-            loads_avg=True,
-            loads_reference="0",
-        ),
+        output_options=output_options,
     )
 
 
@@ -208,7 +224,68 @@ def build_cta_dust_doe_scenario(
     return mads_scenario, dust_discipline
 
 
-def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> None:
+def _variable_csv_keys(variable_name: str) -> tuple[str, ...]:
+    if variable_name.startswith("cta_"):
+        return (variable_name, variable_name[4:])
+    return (variable_name,)
+
+
+def _load_sample_slice(args: argparse.Namespace) -> np.ndarray:
+    path = Path(args.samples_csv).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Sample CSV does not exist: {path}")
+
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+
+    start = max(0, int(args.sample_start))
+    if args.sample_count is None:
+        selected_rows = rows[start:]
+    else:
+        selected_rows = rows[start : start + max(0, int(args.sample_count))]
+
+    if not selected_rows:
+        msg = (
+            f"No DOE samples selected from {path} with "
+            f"sample_start={args.sample_start} and sample_count={args.sample_count}."
+        )
+        raise ValueError(msg)
+
+    samples: list[list[float]] = []
+    for row_index, row in enumerate(selected_rows, start=start):
+        sample: list[float] = []
+        for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES:
+            value: float | None = None
+            for key in _variable_csv_keys(variable.name):
+                raw_value = row.get(key)
+                if raw_value not in (None, ""):
+                    value = float(raw_value)
+                    break
+            if value is None:
+                msg = (
+                    f"Missing design variable '{variable.name}' in sample CSV row "
+                    f"{row_index}. Accepted column names: {_variable_csv_keys(variable.name)}."
+                )
+                raise ValueError(msg)
+            sample.append(value)
+        samples.append(sample)
+
+    return np.asarray(samples, dtype=float)
+
+
+def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> int:
+    if args.samples_csv is not None and args.baseline_only:
+        msg = "--samples-csv and --baseline-only are mutually exclusive."
+        raise ValueError(msg)
+
+    if args.samples_csv is not None:
+        samples = _load_sample_slice(args)
+        scenario.scenario.execute(
+            algo_name="CustomDOE",
+            samples=samples,
+        )
+        return int(samples.shape[0])
+
     if args.baseline_only:
         baseline_sample = np.asarray(
             [[float(variable.value) for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES]],
@@ -218,12 +295,13 @@ def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> None:
             algo_name="CustomDOE",
             samples=baseline_sample,
         )
-        return
+        return 1
 
     scenario.scenario.execute(
         algo_name=args.algo,
         n_samples=args.n_samples,
     )
+    return int(args.n_samples)
 
 
 def _design_space_rows() -> list[dict[str, float | str]]:
@@ -243,7 +321,12 @@ def _design_space_rows() -> list[dict[str, float | str]]:
 def _analysis_settings_rows(args: argparse.Namespace) -> list[list[object]]:
     return [
         ["key", "value"],
+        ["dust_method", args.dust_method],
         ["n_steps", int(args.n_steps)],
+        ["executed_samples", int(getattr(args, "executed_n_samples", 1 if args.baseline_only else args.n_samples))],
+        ["samples_csv", "" if args.samples_csv is None else str(Path(args.samples_csv).resolve())],
+        ["sample_start", int(args.sample_start)],
+        ["sample_count", "" if args.sample_count is None else int(args.sample_count)],
         ["alpha_deg", float(args.alpha_deg)],
         ["mach", float(args.mach)],
         ["altitude_ft", float(args.altitude_ft)],
@@ -272,15 +355,23 @@ def _build_manifest(
             "geometry_mapping": "examples/cta_geom_doe.py::disc_planform_mapping",
             "geometry_core": "multiads.solvers.synthesis.geometry_lib",
             "dust_adapter": "multiads.solvers.aerodynamics.dust_lib.ResolvedGeometryDustDiscipline",
-            "dust_mesh_writer": "multiads.solvers.aerodynamics.dust_lib.write_basic_two_skin_mesh_from_resolved_npz",
+            "dust_geometry_bridge": "multiads.solvers.aerodynamics.dust_lib resolved-geometry runners",
         },
-        "algorithm": "CustomDOE" if args.baseline_only else args.algo,
-        "n_samples": 1 if args.baseline_only else int(args.n_samples),
+        "algorithm": "CustomDOE" if args.baseline_only or args.samples_csv else args.algo,
+        "n_samples": int(
+            getattr(args, "executed_n_samples", 1 if args.baseline_only else args.n_samples),
+        ),
+        "sample_source": {
+            "samples_csv": None if args.samples_csv is None else str(Path(args.samples_csv).resolve()),
+            "sample_start": int(args.sample_start),
+            "sample_count": None if args.sample_count is None else int(args.sample_count),
+        },
         "alpha_deg": float(args.alpha_deg),
         "mach": float(args.mach),
         "altitude_ft": float(args.altitude_ft),
         "disa_k": float(args.disa_k),
         "mesh": {
+            "dust_method": args.dust_method,
             "span_stations": int(args.mesh_span_stations),
             "chord_stations": int(args.mesh_chord_stations),
             "span_spacing": args.span_spacing,
@@ -322,8 +413,9 @@ def _build_manifest(
         },
         "notes": [
             (
-                "DUST receives a derived panel mesh from the resolved geometry, "
-                "not only section definitions."
+                "DUST receives a mesh derived from the resolved geometry, not only "
+                "section definitions. For VLM campaigns this mesh is converted into "
+                "a parametric DUST wing inside dust_lib.py."
             ),
             "CL, CD and CM are normalized using the resolved sample area and MAC.",
             "For this debugging/campaign setup, drag is read from the reference axes without additional wind-axis projection.",
@@ -338,24 +430,48 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-samples", type=int, default=1, help="Number of LHS/DOE samples.")
     parser.add_argument("--algo", default="LHS", help="GEMSEO DOE algorithm, e.g. LHS.")
     parser.add_argument(
+        "--samples-csv",
+        type=Path,
+        default=None,
+        help="Run a fixed DOE sample table instead of generating samples inside GEMSEO.",
+    )
+    parser.add_argument(
+        "--sample-start",
+        type=int,
+        default=0,
+        help="First row to run from --samples-csv. Used for HPC shards.",
+    )
+    parser.add_argument(
+        "--sample-count",
+        type=int,
+        default=None,
+        help="Number of rows to run from --samples-csv. Used for HPC shards.",
+    )
+    parser.add_argument(
         "--baseline-only",
         action="store_true",
         help="Run one CustomDOE sample at the CTA baseline instead of an LHS campaign.",
+    )
+    parser.add_argument(
+        "--dust-method",
+        choices=SUPPORTED_DUST_METHODS,
+        default="vlm",
+        help="DUST aerodynamic discretization used by the DOE campaign.",
     )
     parser.add_argument("--alpha-deg", type=float, default=3.0, help="DUST angle of attack in degrees.")
     parser.add_argument("--mach", type=float, default=0.8, help="Freestream Mach number.")
     parser.add_argument("--altitude-ft", type=float, default=40000.0, help="Altitude in feet.")
     parser.add_argument("--disa-k", type=float, default=0.0, help="DISA temperature offset, recorded in outputs.")
-    parser.add_argument("--mesh-span-stations", type=int, default=49, help="Half-span DUST mesh stations before mirroring.")
-    parser.add_argument("--mesh-chord-stations", type=int, default=45, help="DUST chordwise stations per skin.")
+    parser.add_argument("--mesh-span-stations", type=int, default=21, help="Half-span DUST mesh stations before mirroring.")
+    parser.add_argument("--mesh-chord-stations", type=int, default=21, help="DUST chordwise stations per skin.")
     parser.add_argument("--span-spacing", choices=["uniform", "curvature"], default="curvature")
     parser.add_argument("--chord-spacing", choices=["uniform", "curvature"], default="curvature")
     parser.add_argument("--span-curvature-weight", type=float, default=5.0)
     parser.add_argument("--chord-curvature-weight", type=float, default=4.0)
     parser.add_argument("--leading-edge-opening-m", type=float, default=0.0)
-    parser.add_argument("--n-steps", type=int, default=80)
+    parser.add_argument("--n-steps", type=int, default=150)
     parser.add_argument("--dt", type=float, default=0.005)
-    parser.add_argument("--n-threads", type=int, default=6)
+    parser.add_argument("--n-threads", type=int, default=1)
     parser.add_argument("--n-wake-particles", type=int, default=100000)
     parser.add_argument("--dust-bin-dir", default=None, help="Directory containing dust_pre, dust and dust_post.")
     parser.add_argument("--no-vtk", action="store_true", help="Skip VTK wake/solution export.")
@@ -388,7 +504,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     scenario, _dust_discipline = build_cta_dust_doe_scenario(args)
-    _execute_scenario(scenario, args)
+    args.executed_n_samples = _execute_scenario(scenario, args)
 
     dataset = scenario.scenario.to_dataset(opt_naming=False)
     export_paths = campaign_export_paths(args.output_dir, "cta_dust_doe")
@@ -404,8 +520,13 @@ def main() -> None:
     )
 
     print("CTA DUST DOE completed")
-    print(f"  algo = {'CustomDOE' if args.baseline_only else args.algo}")
-    print(f"  n_samples = {1 if args.baseline_only else args.n_samples}")
+    print(f"  algo = {'CustomDOE' if args.baseline_only or args.samples_csv else args.algo}")
+    print(f"  dust_method = {args.dust_method}")
+    print(f"  n_steps = {args.n_steps}")
+    print(f"  executed_samples = {args.executed_n_samples}")
+    if args.samples_csv is not None:
+        print(f"  samples_csv = {Path(args.samples_csv).resolve()}")
+        print(f"  sample_slice = [{args.sample_start}, {args.sample_start + args.executed_n_samples})")
     print(f"  alpha_deg = {args.alpha_deg:g}")
     print(f"  output_dir = {args.output_dir}")
     print(f"  flat_dataset = {export_paths.flat_dataset_csv}")

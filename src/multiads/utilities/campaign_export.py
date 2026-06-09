@@ -238,3 +238,60 @@ def write_campaign_results(
     )
     export_paths.manifest_json.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return export_paths
+
+
+def find_shard_flat_datasets(
+    campaign_root: str | Path,
+    *,
+    file_name: str = "cta_dust_doe_dataset_flat.csv",
+) -> list[Path]:
+    """Find flat dataset CSV files written by campaign shards."""
+
+    root = Path(campaign_root)
+    return sorted(root.glob(f"shards/shard_*/{file_name}"))
+
+
+def merge_flat_campaign_csvs(
+    input_csvs: list[str | Path],
+    output_csv: str | Path,
+    *,
+    source_column: str = "source_file",
+    shard_column: str = "shard",
+) -> int:
+    """Merge flat campaign CSV files and add source metadata columns."""
+
+    paths = [Path(path) for path in input_csvs]
+    if not paths:
+        msg = "No shard CSV files were provided for merging."
+        raise ValueError(msg)
+
+    data_fieldnames: list[str] = []
+    for path in paths:
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            for field in reader.fieldnames or []:
+                if field not in {source_column, shard_column} and field not in data_fieldnames:
+                    data_fieldnames.append(field)
+
+    output_path = Path(output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    row_count = 0
+    with output_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=[shard_column, source_column, *data_fieldnames],
+        )
+        writer.writeheader()
+        for path in paths:
+            shard_name = path.parent.name
+            with path.open(newline="", encoding="utf-8") as input_stream:
+                reader = csv.DictReader(input_stream)
+                for row in reader:
+                    output_row = {
+                        shard_column: shard_name,
+                        source_column: str(path),
+                    }
+                    output_row.update({field: row.get(field, "") for field in data_fieldnames})
+                    writer.writerow(output_row)
+                    row_count += 1
+    return row_count

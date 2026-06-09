@@ -350,38 +350,75 @@ The first CFD campaign uses the 14-variable design space:
   cta_thickness_s4, cta_thickness_s5
 ```
 
-Run a 20-sample LHS campaign at `AoA = 3 deg`:
+The production aerodynamic dataset uses DUST-VLM, `AoA = 3 deg`, and
+`n_steps = 150`. The recommended workflow is to generate one fixed DOE sample
+table first, then let each worker run a different slice of that table.
+
+Generate a fixed 5,000-sample Sobol table:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --n-samples 20   --alpha-deg 3.0   --dust-bin-dir "$MADS_DUST_BIN_DIR"   --output-dir ../MADS/outputs/CTA_case/doe_dust_20
+python examples/cta_generate_doe_samples.py \
+  --method sobol \
+  --n-samples 5000 \
+  --seed 17 \
+  --output-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
 ```
 
-By default, DUST uses `n_steps = 80` in `cta_dust_doe.py`. The physical DUST run directory is overwritten:
+Run the first 50 samples from that table:
+
+```bash
+python examples/cta_dust_doe.py \
+  --samples-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv \
+  --sample-start 0 \
+  --sample-count 50 \
+  --dust-method vlm \
+  --alpha-deg 3.0 \
+  --n-steps 150 \
+  --mesh-span-stations 21 \
+  --mesh-chord-stations 21 \
+  --n-threads 1 \
+  --no-vtk \
+  --output-dir outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000
+```
+
+The physical DUST run directory is overwritten inside each shard:
 
 ```text
-MADS/outputs/CTA_case/doe_dust/cases/run/
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cases/run/
 ```
 
-This avoids storing a full DUST run directory for every sample. The campaign history is kept in CSV/XLSX tables. Use `--store-case-directories` only when one directory per sample is needed for debugging.
+This avoids storing a full DUST run directory for every sample. The campaign
+history is kept in CSV/XLSX/JSON tables. Use `--store-case-directories` only
+when one directory per sample is needed for debugging.
 
 Run only the baseline within the same GEMSEO/DUST workflow:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_dust_doe.py   --baseline-only   --alpha-deg 3.0   --dust-bin-dir "$MADS_DUST_BIN_DIR"
+python examples/cta_dust_doe.py \
+  --baseline-only \
+  --dust-method vlm \
+  --alpha-deg 3.0 \
+  --n-steps 150 \
+  --no-vtk
 ```
 
 Main command-line options:
 
 ```text
---n-samples N                 number of DOE samples
---algo LHS                    GEMSEO DOE algorithm
+--samples-csv FILE            fixed DOE sample table for production campaigns
+--sample-start I              first row to run from --samples-csv
+--sample-count N              number of rows to run from --samples-csv
+--n-samples N                 generate samples inside GEMSEO when no CSV is supplied
+--algo LHS                    GEMSEO DOE algorithm for internal sample generation
+--dust-method vlm             DUST method: vlm or panels
 --alpha-deg 3.0               DUST angle of attack
---mesh-span-stations 49       half-span stations before mirroring
---mesh-chord-stations 45      chordwise points per skin
+--mesh-span-stations 21       half-span VLM stations before mirroring
+--mesh-chord-stations 21      chordwise VLM stations
 --span-spacing curvature      adaptive spanwise mesh
 --chord-spacing curvature     adaptive chordwise mesh
 --leading-edge-opening-m 0.0  closed leading edge
---n-steps 80                  DUST time steps per sample
+--n-steps 150                 DUST time steps per sample
+--n-threads 1                 threads used inside each DUST case
 --store-case-directories      keep sample_XXXX instead of overwriting cases/run
 --no-vtk                      skip ParaView output to reduce I/O
 --fail-fast                   stop if a sample fails
@@ -390,12 +427,13 @@ Main command-line options:
 Campaign outputs:
 
 ```text
-MADS/outputs/CTA_case/doe_dust/cta_dust_doe_dataset.csv
-MADS/outputs/CTA_case/doe_dust/cta_dust_doe_dataset_flat.csv
-MADS/outputs/CTA_case/doe_dust/cta_dust_doe_results.xlsx
-MADS/outputs/CTA_case/doe_dust/cta_dust_doe_design_space.csv
-MADS/outputs/CTA_case/doe_dust/cta_dust_doe_manifest.json
-MADS/outputs/CTA_case/doe_dust/cases/run/
+outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cta_dust_doe_dataset.csv
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cta_dust_doe_dataset_flat.csv
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cta_dust_doe_results.xlsx
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cta_dust_doe_design_space.csv
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cta_dust_doe_manifest.json
+outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cases/run/
 ```
 
 The Excel workbook contains:
@@ -406,14 +444,67 @@ design_space  baseline, lower_bound and upper_bound for the 14 variables
 analysis_settings summary of Environment, Options, OutputOptions and storage policy
 ```
 
-The DUST connection does not create a parallel configuration class. The example `cta_dust_doe.py` directly builds:
+The DUST connection does not create a separate parallel configuration class.
+The example `cta_dust_doe.py` directly builds:
 
 ```text
 Environment    altitude, Mach/speed and alpha
 Options        executables, time, wake, particles, folders and threads
 OutputOptions  loads and visualization/post-processing
-WingOptions    panel method, basic mesh, TE projection and load averaging window
-DustMeshSettings only controls remeshing of the resolved geometry
+WingOptions    VLM method, TE projection and load averaging window
+DustMeshSettings controls remeshing of the resolved geometry before DUST
+```
+
+### HPC Parallelization
+
+There are two independent levels of parallelism:
+
+```text
+--n-threads / DUST_THREADS     threads used by one DUST process
+workers / SLURM array tasks    number of DUST cases running at the same time
+```
+
+For large VLM campaigns, prefer many single-thread workers:
+
+```text
+DUST_THREADS=1
+CASES_PER_WORKER=50
+SLURM_ARRAY_TASKS = total_samples / CASES_PER_WORKER
+```
+
+Example for 5,000 samples with 50 samples per worker:
+
+```bash
+mkdir -p outputs/CTA_case/datasets/slurm_logs
+
+export DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
+export DUST_LIB_DIR=<OPTIONAL_EXTRA_DUST_OR_HDF5_LIB_DIR>
+export VENV_DIR=<VENV_DIR>
+export SAMPLES_CSV=outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+export CAMPAIGN_ROOT=outputs/CTA_case/datasets/campaign_001_exploration
+export CASES_PER_WORKER=50
+export DUST_THREADS=1
+export N_STEPS=150
+export MESH_SPAN_STATIONS=21
+export MESH_CHORD_STATIONS=21
+
+sbatch --array=0-99 scripts/slurm_cta_dust_vlm_shards.sh
+```
+
+Each SLURM task writes one shard folder. The per-worker folder is safe to
+overwrite internally because only one process writes to that folder.
+
+After the array finishes, merge all shard tables into one campaign CSV:
+
+```bash
+python examples/cta_merge_dust_shards.py \
+  --campaign-root outputs/CTA_case/datasets/campaign_001_exploration
+```
+
+The merged table is written to:
+
+```text
+outputs/CTA_case/datasets/campaign_001_exploration/cta_dust_vlm_dataset_flat.csv
 ```
 
 In `results`, the columns `outputs.cta_box_*` are packaging indicator-surface checks:
