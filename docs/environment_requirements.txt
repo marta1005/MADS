@@ -245,44 +245,50 @@ Run CTA + DUST-VLM baseline at AoA = 3 deg, 150 time steps:
     --no-vtk \
     --output-dir <MADS_ROOT>/outputs/CTA_case/datasets/baseline_vlm_150_aoa03
 
-Generate a fixed DOE sample table for a campaign:
-
-  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
-    --generate-samples-only \
-    --sample-method sobol \
-    --n-samples 5000 \
-    --sample-seed 17 \
-    --samples-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
-
-Run a serial shard of 50 samples from that table:
-
-  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
-    --samples-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv \
-    --sample-start 0 \
-    --sample-count 50 \
-    --dust-method vlm \
-    --alpha-deg 3.0 \
-    --n-steps 150 \
-    --mesh-span-stations 21 \
-    --mesh-chord-stations 21 \
-    --n-threads 1 \
-    --dust-bin-dir <DUST_INSTALL_DIR>/bin \
-    --no-vtk \
-    --output-dir <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000
-
-Run the same campaign with SLURM arrays:
+Generate a fixed DOE sample table for a campaign through qsub:
 
   cd <MADS_ROOT>
-  mkdir -p outputs/CTA_case/datasets/slurm_logs
-  export DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
-  export DUST_LIB_DIR=<OPTIONAL_EXTRA_DUST_OR_HDF5_LIB_DIR>
-  export VENV_DIR=<VENV_DIR>
-  export SAMPLES_CSV=outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
-  export CAMPAIGN_ROOT=outputs/CTA_case/datasets/campaign_001_exploration
-  export CASES_PER_WORKER=50
-  export DUST_THREADS=1
-  export N_STEPS=150
-  sbatch --array=0-99 scripts/slurm_cta_dust_vlm_shards.sh
+  qsub scripts/qsub_cta_generate_doe.sh
+
+The DOE size, campaign root, sampling method, seed and optional environment
+paths are configured in the "User configuration" block at the top of:
+
+  scripts/qsub_cta_generate_doe.sh
+
+After the DOE job finishes, run the DUST-VLM campaign with qsub / Grid Engine
+arrays:
+
+  cd <MADS_ROOT>
+  qsub scripts/qsub_cta_dust_vlm_shards.sh
+
+The DUST paths, sample CSV, campaign root, number of steps, mesh settings and
+case count per worker are configured in the "User configuration" block at the
+top of:
+
+  scripts/qsub_cta_dust_vlm_shards.sh
+
+The qsub array range is configured directly in the script with:
+
+  #$ -t 1-1      one-worker smoke test
+  #$ -t 1-100    5,000 samples with 50 samples per worker
+
+On the current office cluster, both qsub scripts are pinned to:
+
+  #$ -q m7gpus
+
+because the DUST/Python RHEL8 environment is available on the mcn320/mcn321
+nodes behind that queue. If the cluster configuration changes, update the queue
+directive at the top of both qsub scripts.
+
+For qsub / Grid Engine, the array range is usually 1-based. The example above
+runs 100 queue tasks for 5,000 samples with 50 samples per task. The script
+internally converts SGE_TASK_ID=1 to sample_start=0.
+
+qsub writes its scheduler-level logs in <MADS_ROOT>/cta_doe.out,
+<MADS_ROOT>/cta_doe.err, <MADS_ROOT>/cta_vlm.out and <MADS_ROOT>/cta_vlm.err.
+The per-campaign logs are written under:
+
+  outputs/CTA_case/datasets/campaign_001_exploration/logs/
 
 Merge finished shards into one flat CSV:
 

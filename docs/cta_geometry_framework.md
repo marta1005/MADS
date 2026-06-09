@@ -341,30 +341,15 @@ table first, then let each worker run a different slice of that table.
 Generate a fixed 5,000-sample Sobol table:
 
 ```bash
-python examples/cta_dust_doe.py \
-  --generate-samples-only \
-  --sample-method sobol \
-  --n-samples 5000 \
-  --sample-seed 17 \
-  --samples-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+qsub scripts/qsub_cta_generate_doe.sh
 ```
 
-Run the first 50 samples from that table:
-
-```bash
-python examples/cta_dust_doe.py \
-  --samples-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv \
-  --sample-start 0 \
-  --sample-count 50 \
-  --dust-method vlm \
-  --alpha-deg 3.0 \
-  --n-steps 150 \
-  --mesh-span-stations 21 \
-  --mesh-chord-stations 21 \
-  --n-threads 1 \
-  --no-vtk \
-  --output-dir outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000
-```
+The campaign size, sampling method, seed and optional environment paths are
+defined in the "User configuration" block at the top of
+`scripts/qsub_cta_generate_doe.sh`. The job writes the samples CSV under
+`outputs/CTA_case/datasets/campaign_001_exploration/samples/` and logs the
+generation step under
+`outputs/CTA_case/datasets/campaign_001_exploration/logs/generate_doe.log`.
 
 The physical DUST run directory is overwritten inside each shard:
 
@@ -375,17 +360,6 @@ outputs/CTA_case/datasets/campaign_001_exploration/shards/shard_00000/cases/run/
 This avoids storing a full DUST run directory for every sample. The campaign
 history is kept in CSV/XLSX/JSON tables. Use `--store-case-directories` only
 when one directory per sample is needed for debugging.
-
-Run only the baseline within the same GEMSEO/DUST workflow:
-
-```bash
-python examples/cta_dust_doe.py \
-  --baseline-only \
-  --dust-method vlm \
-  --alpha-deg 3.0 \
-  --n-steps 150 \
-  --no-vtk
-```
 
 Main command-line options:
 
@@ -449,7 +423,7 @@ There are two independent levels of parallelism:
 
 ```text
 --n-threads / DUST_THREADS     threads used by one DUST process
-workers / SLURM array tasks    number of DUST cases running at the same time
+workers / queue array tasks    number of DUST cases running at the same time
 ```
 
 For large VLM campaigns, prefer many single-thread workers:
@@ -457,29 +431,40 @@ For large VLM campaigns, prefer many single-thread workers:
 ```text
 DUST_THREADS=1
 CASES_PER_WORKER=50
-SLURM_ARRAY_TASKS = total_samples / CASES_PER_WORKER
+QSUB_ARRAY_TASKS = total_samples / CASES_PER_WORKER
 ```
 
 Example for 5,000 samples with 50 samples per worker:
 
 ```bash
-mkdir -p outputs/CTA_case/datasets/slurm_logs
+qsub scripts/qsub_cta_generate_doe.sh
 
-export DUST_BIN_DIR=<DUST_INSTALL_DIR>/bin
-export DUST_LIB_DIR=<OPTIONAL_EXTRA_DUST_OR_HDF5_LIB_DIR>
-export VENV_DIR=<VENV_DIR>
-export SAMPLES_CSV=outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
-export CAMPAIGN_ROOT=outputs/CTA_case/datasets/campaign_001_exploration
-export CASES_PER_WORKER=50
-export DUST_THREADS=1
-export N_STEPS=150
-export MESH_SPAN_STATIONS=21
-export MESH_CHORD_STATIONS=21
-
-sbatch --array=0-99 scripts/slurm_cta_dust_vlm_shards.sh
+qsub scripts/qsub_cta_dust_vlm_shards.sh
 ```
 
-Each SLURM task writes one shard folder. The per-worker folder is safe to
+The VLM qsub script has a "User configuration" block for the DUST paths,
+sample CSV, campaign root, number of steps and mesh settings. It also has the
+array range as a qsub directive:
+
+```bash
+#$ -t 1-1      one-worker smoke test
+#$ -t 1-100    5,000 samples with 50 samples per worker
+```
+
+Both qsub scripts are pinned to the office-cluster RHEL8-capable queue:
+
+```bash
+#$ -q m7gpus
+```
+
+This sends the jobs to the mcn320/mcn321 nodes, where the DUST/Python
+environment is available.
+
+For qsub / Grid Engine, the array index is usually 1-based. The worker converts
+`SGE_TASK_ID=1` to `sample_start=0`, `SGE_TASK_ID=2` to `sample_start=50`, and
+so on.
+
+Each queue task writes one shard folder. The per-worker folder is safe to
 overwrite internally because only one process writes to that folder.
 
 After the array finishes, merge all shard tables into one campaign CSV:
