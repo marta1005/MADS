@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import logging
+import re
 from math import atan2, degrees, radians, sin, tan
 from pathlib import Path
 from typing import Mapping
 
 import gemseo
 import numpy as np
+from scipy.stats import qmc
 
 from multiads.assembly import AirfoilCST, Section, Span, Wing
 from multiads.cases.cta_laws import (
     build_cta_resolved_station_factory,
     build_cta_span_station_array,
 )
+from multiads.disciplines import UserDefined
 from multiads.disciplines.geometry import Geometry
 from multiads.scenario import VariableFloat
 from multiads.solvers.synthesis import (
@@ -24,6 +28,11 @@ from multiads.solvers.synthesis import (
     quintic_c2_transition,
     write_resolved_surface_mesh_npz,
 )
+from multiads.utilities.internal_volume_constraints import (
+    CadReferenceFrame,
+    evaluate_internal_volume_constraints,
+    load_internal_volume_constraint_set,
+)
 
 
 gemseo.configure_logger(
@@ -31,6 +40,9 @@ gemseo.configure_logger(
     filename="gemseo.log",
     filemode="w",
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +746,434 @@ disc_geometry = Geometry(
     components=[wing],
     solver=CSTGeometrySolver(),
 )
+
+
+# ---------------------------------------------------------------------------
+# DOE / DUST campaign helpers
+# ---------------------------------------------------------------------------
+CTA_DOE_DESIGN_VARIABLES = list(CTA_CFD_JUNE_14_DESIGN_VARIABLES)
+
+CTA_INTERNAL_VOLUME_CONSTRAINTS_PATH = (
+    REPO_ROOT / "assets" / "cta" / "internal_volume_constraints_set1.csv"
+)
+TRIANGLE_RESOLUTION = 8
+ENABLE_INTERNAL_BOX_EVALUATION = True
+
+GEOMETRY_METRIC_VARIABLES = [
+    disc_geometry.solver.metric_outputs["cta_wing.span_m"],
+    disc_geometry.solver.metric_outputs["cta_wing.planform_area_m2"],
+    disc_geometry.solver.metric_outputs["cta_wing.enclosed_volume_m3"],
+    disc_geometry.solver.metric_outputs["cta_wing.root_chord_m"],
+    disc_geometry.solver.metric_outputs["cta_wing.tip_chord_m"],
+    disc_geometry.solver.metric_outputs["cta_wing.mean_aerodynamic_chord_m"],
+]
+
+cta_planform_mapping_outputs = [
+    chord_c0,
+    chord_s1,
+    chord_s1a,
+    chord_s2,
+    chord_c3,
+    chord_c4,
+    chord_s4a,
+    chord_s4b,
+    chord_c5,
+    y_s4,
+    y_s4a,
+    y_s4b,
+    y_s5,
+    le_x_s1a,
+    le_x_s3,
+    le_x_s4,
+    le_x_s4a,
+    le_x_s4b,
+    le_x_s5,
+    le_z_s0,
+    le_z_s1,
+    le_z_s1a,
+    le_z_s2,
+    le_z_s3,
+    le_z_s4,
+    le_z_s4a,
+    le_z_s4b,
+    le_z_s5,
+    twist_s0,
+    twist_s1,
+    twist_s1a,
+    twist_s2,
+    twist_s3,
+    te_s0,
+    te_s1,
+    te_s1a,
+    te_s2,
+    te_s3,
+    te_s4,
+    te_s4a,
+    te_s4b,
+    te_s5,
+]
+
+geometry_valid = VariableFloat("cta_geometry_valid", 1.0)
+geometry_failure_code = VariableFloat("cta_geometry_failure_code", 0.0)
+packaging_valid = VariableFloat("cta_packaging_valid", 1.0)
+packaging_min_margin = VariableFloat("cta_packaging_min_margin_m", 0.0)
+validation_result_variables = [
+    geometry_valid,
+    geometry_failure_code,
+    packaging_valid,
+    packaging_min_margin,
+]
+
+
+def to_scalar(value) -> float:  # noqa: ANN001
+    return float(np.ravel(value)[0])
+
+
+def _cta_planform_design_mapping(  # noqa: PLR0913
+    delta_c0_m,
+    delta_c3_m,
+    delta_c5_m,
+    taper_ratio_midwing,
+    rspan_midwing,
+    span_wing_m,
+    sweep_midwing_deg,
+    sweep_outwing_deg,
+    twist_s4_deg,
+    twist_s4a_deg,
+    twist_s4b_deg,
+    twist_s5_deg,
+    thickness_s4,
+    thickness_s5,
+):  # noqa: ANN001, ANN201
+    derived = derive_cfd_geometry_values(
+        {
+            "delta_c0_m": to_scalar(delta_c0_m),
+            "delta_c3_m": to_scalar(delta_c3_m),
+            "delta_c5_m": to_scalar(delta_c5_m),
+            "taper_ratio_midwing": to_scalar(taper_ratio_midwing),
+            "rspan_midwing": to_scalar(rspan_midwing),
+            "span_wing_m": to_scalar(span_wing_m),
+            "sweep_midwing_deg": to_scalar(sweep_midwing_deg),
+            "sweep_outwing_deg": to_scalar(sweep_outwing_deg),
+            "twist_s4_deg": to_scalar(twist_s4_deg),
+            "twist_s4a_deg": to_scalar(twist_s4a_deg),
+            "twist_s4b_deg": to_scalar(twist_s4b_deg),
+            "twist_s5_deg": to_scalar(twist_s5_deg),
+            "thickness_s4": to_scalar(thickness_s4),
+            "thickness_s5": to_scalar(thickness_s5),
+        },
+    )
+    chords = derived["chords_m"]
+    y = derived["spanwise_y_m"]
+    le_x = derived["leading_edge_x_m"]
+    le_z = derived["leading_edge_z_m"]
+    twist = derived["twist_deg"]
+    te = derived["trailing_edge_thickness"]
+
+    return (
+        chords["s0"],
+        chords["s1"],
+        chords["s1a"],
+        chords["s2"],
+        chords["s3"],
+        chords["s4"],
+        chords["s4a"],
+        chords["s4b"],
+        chords["s5"],
+        y["s4"],
+        y["s4a"],
+        y["s4b"],
+        y["s5"],
+        le_x["s1a"],
+        le_x["s3"],
+        le_x["s4"],
+        le_x["s4a"],
+        le_x["s4b"],
+        le_x["s5"],
+        le_z["s0"],
+        le_z["s1"],
+        le_z["s1a"],
+        le_z["s2"],
+        le_z["s3"],
+        le_z["s4"],
+        le_z["s4a"],
+        le_z["s4b"],
+        le_z["s5"],
+        twist["s0"],
+        twist["s1"],
+        twist["s1a"],
+        twist["s2"],
+        twist["s3"],
+        te["s0"],
+        te["s1"],
+        te["s1a"],
+        te["s2"],
+        te["s3"],
+        te["s4"],
+        te["s4a"],
+        te["s4b"],
+        te["s5"],
+    )
+
+
+def _load_cta_internal_volume_constraints():
+    return load_internal_volume_constraint_set(
+        CTA_INTERNAL_VOLUME_CONSTRAINTS_PATH,
+        reference_frame=CadReferenceFrame(
+            name="CTA CAD reference",
+            offset_x_m=0.0,
+            offset_y_m=0.0,
+            offset_z_m=0.0,
+            mirror_about_symmetry_plane=True,
+        ),
+        name="CTA B359-V0 internal volume boxes",
+    )
+
+
+CTA_INTERNAL_VOLUME_CONSTRAINTS = (
+    _load_cta_internal_volume_constraints()
+    if ENABLE_INTERNAL_BOX_EVALUATION
+    else None
+)
+
+all_boxes_fit = VariableFloat("cta_all_boxes_fit", 1.0)
+internal_boxes_min_margin = VariableFloat("cta_internal_boxes_min_margin_m", 0.0)
+box_result_variables: list[VariableFloat] = []
+if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
+    box_result_variables.extend([all_boxes_fit, internal_boxes_min_margin])
+    for idx, surface in enumerate(CTA_INTERNAL_VOLUME_CONSTRAINTS.surfaces, start=1):
+        safe_label = re.sub(r"[^0-9a-zA-Z]+", "_", surface.label).strip("_").lower()
+        box_result_variables.extend(
+            [
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_fits", 0.0),
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_margin_m", 0.0),
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_footprint_area_m2", 0.0),
+                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_clearance_volume_m3", 0.0),
+            ],
+        )
+
+
+def _evaluate_internal_boxes_from_last_geometry(*_geometry_metrics):  # noqa: ANN002, ANN201
+    if CTA_INTERNAL_VOLUME_CONSTRAINTS is None:
+        msg = "CTA internal volume constraints are disabled."
+        raise RuntimeError(msg)
+
+    resolved_wing = disc_geometry.components[0]
+    geometry = getattr(resolved_wing, "geometry_state", None)
+    if geometry is None:
+        msg = "CTA geometry must be resolved before evaluating internal volume boxes."
+        raise RuntimeError(msg)
+
+    result = evaluate_internal_volume_constraints(
+        geometry,
+        CTA_INTERNAL_VOLUME_CONSTRAINTS,
+        triangle_resolution=TRIANGLE_RESOLUTION,
+    )
+    outputs = [
+        1.0 if result.satisfied else 0.0,
+        result.minimum_margin_m,
+    ]
+    for surface_result in result.surface_results:
+        outputs.extend(
+            [
+                1.0 if surface_result.satisfied else 0.0,
+                surface_result.worst_margin_m,
+                surface_result.footprint_area_m2,
+                surface_result.clearance_volume_m3,
+            ],
+        )
+    return tuple(outputs)
+
+
+def _validate_cta_geometry(*values):  # noqa: ANN002, ANN201
+    span_m, area_m2, volume_m3, root_chord_m, tip_chord_m, mac_m = [
+        to_scalar(value)
+        for value in values[:6]
+    ]
+    metrics = np.asarray(
+        [span_m, area_m2, volume_m3, root_chord_m, tip_chord_m, mac_m],
+        dtype=float,
+    )
+    positive_metrics = metrics[[0, 1, 3, 4, 5]]
+    if not np.all(np.isfinite(metrics)) or np.any(positive_metrics <= 0.0):
+        return 0.0, 1.0, 0.0, 0.0
+
+    if ENABLE_INTERNAL_BOX_EVALUATION:
+        boxes_fit = to_scalar(values[6])
+        min_margin_m = to_scalar(values[7])
+        if boxes_fit < 0.5:
+            return 0.0, 2.0, 0.0, min_margin_m
+        return 1.0, 0.0, 1.0, min_margin_m
+
+    return 1.0, 0.0, 1.0, 0.0
+
+
+disc_planform_mapping = UserDefined(
+    name="CTAPlanformDesignMapping",
+    inputs=CTA_DOE_DESIGN_VARIABLES,
+    outputs=cta_planform_mapping_outputs,
+    expression=_cta_planform_design_mapping,
+)
+
+disc_internal_boxes = (
+    UserDefined(
+        name="CTAInternalBoxFit",
+        inputs=[disc_geometry.solver.metric_outputs["cta_wing.enclosed_volume_m3"]],
+        outputs=box_result_variables,
+        expression=_evaluate_internal_boxes_from_last_geometry,
+    )
+    if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None
+    else None
+)
+
+validation_inputs = list(GEOMETRY_METRIC_VARIABLES)
+if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
+    validation_inputs.extend([all_boxes_fit, internal_boxes_min_margin])
+
+disc_geometry_validation = UserDefined(
+    name="CTAGeometryValidation",
+    inputs=validation_inputs,
+    outputs=validation_result_variables,
+    expression=_validate_cta_geometry,
+)
+
+
+def design_space_rows() -> list[dict[str, float | str]]:
+    return [
+        {
+            "name": variable.name,
+            "baseline": float(variable.value),
+            "lower_bound": float(variable.lb),
+            "upper_bound": float(variable.ub),
+        }
+        for variable in CTA_DOE_DESIGN_VARIABLES
+    ]
+
+
+def baseline_sample() -> np.ndarray:
+    return np.asarray(
+        [[float(variable.value) for variable in CTA_DOE_DESIGN_VARIABLES]],
+        dtype=float,
+    )
+
+
+def _unit_samples(method: str, n_samples: int, n_variables: int, seed: int) -> np.ndarray:
+    if method == "sobol":
+        sampler = qmc.Sobol(d=n_variables, scramble=True, seed=seed)
+        return sampler.random(n_samples)
+    if method == "halton":
+        sampler = qmc.Halton(d=n_variables, scramble=True, seed=seed)
+        return sampler.random(n_samples)
+    if method == "lhs":
+        sampler = qmc.LatinHypercube(d=n_variables, seed=seed)
+        return sampler.random(n_samples)
+    if method == "random":
+        rng = np.random.default_rng(seed)
+        return rng.random((n_samples, n_variables))
+    msg = f"Unsupported sampling method: {method}"
+    raise ValueError(msg)
+
+
+def generate_design_samples(
+    method: str,
+    n_samples: int,
+    seed: int,
+) -> list[dict[str, float | int]]:
+    lower = np.asarray([float(variable.lb) for variable in CTA_DOE_DESIGN_VARIABLES], dtype=float)
+    upper = np.asarray([float(variable.ub) for variable in CTA_DOE_DESIGN_VARIABLES], dtype=float)
+    unit = _unit_samples(method, n_samples, len(CTA_DOE_DESIGN_VARIABLES), seed)
+    values = qmc.scale(unit, lower, upper)
+
+    rows: list[dict[str, float | int]] = []
+    for index, sample in enumerate(values):
+        row: dict[str, float | int] = {"case_id": index}
+        for variable, value in zip(CTA_DOE_DESIGN_VARIABLES, sample):
+            row[variable.name] = float(value)
+        rows.append(row)
+    return rows
+
+
+def write_design_samples_csv(
+    path: str | Path,
+    *,
+    method: str,
+    n_samples: int,
+    seed: int,
+) -> Path:
+    rows = generate_design_samples(method, int(n_samples), int(seed))
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["case_id", *(variable.name for variable in CTA_DOE_DESIGN_VARIABLES)]
+    with output_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return output_path
+
+
+def variable_csv_keys(variable_name: str) -> tuple[str, ...]:
+    if variable_name.startswith("cta_"):
+        return (variable_name, variable_name[4:])
+    return (variable_name,)
+
+
+def load_design_sample_slice(
+    path: str | Path,
+    *,
+    sample_start: int = 0,
+    sample_count: int | None = None,
+) -> np.ndarray:
+    sample_path = Path(path).expanduser().resolve()
+    if not sample_path.exists():
+        raise FileNotFoundError(f"Sample CSV does not exist: {sample_path}")
+
+    with sample_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+
+    start = max(0, int(sample_start))
+    if sample_count is None:
+        selected_rows = rows[start:]
+    else:
+        selected_rows = rows[start : start + max(0, int(sample_count))]
+
+    if not selected_rows:
+        msg = (
+            f"No DOE samples selected from {sample_path} with "
+            f"sample_start={sample_start} and sample_count={sample_count}."
+        )
+        raise ValueError(msg)
+
+    samples: list[list[float]] = []
+    for row_index, row in enumerate(selected_rows, start=start):
+        sample: list[float] = []
+        for variable in CTA_DOE_DESIGN_VARIABLES:
+            value: float | None = None
+            for key in variable_csv_keys(variable.name):
+                raw_value = row.get(key)
+                if raw_value not in (None, ""):
+                    value = float(raw_value)
+                    break
+            if value is None:
+                msg = (
+                    f"Missing design variable '{variable.name}' in sample CSV row "
+                    f"{row_index}. Accepted column names: {variable_csv_keys(variable.name)}."
+                )
+                raise ValueError(msg)
+            sample.append(value)
+        samples.append(sample)
+
+    return np.asarray(samples, dtype=float)
+
+
+def value_for_variable(row: dict[str, str], variable_name: str) -> float:
+    for column in row:
+        if column == variable_name or column.endswith(f".{variable_name}"):
+            return float(row[column])
+        negated_name = f"-{variable_name}"
+        if column == negated_name or column.endswith(f".{negated_name}"):
+            return -float(row[column])
+    msg = f"Could not find variable '{variable_name}' in flattened DOE dataset."
+    raise KeyError(msg)
 
 
 def _summary_json(

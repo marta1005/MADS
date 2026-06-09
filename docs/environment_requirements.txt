@@ -222,19 +222,13 @@ Validate MADS CTA imports:
 
   PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
   PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
-  <VENV_DIR>/bin/python -c "import cta_geometry; import cta_geom_doe; import cta_dust_doe; print('MADS CTA imports OK')"
+  <VENV_DIR>/bin/python -c "import cta_geometry; import cta_dust_doe; print('MADS CTA imports OK')"
 
 Generate CTA geometry and IGES:
 
   PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
   PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
   <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_geometry.py
-
-Run the geometry-only baseline check:
-
-  PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=<WRITABLE_TEMP_MPL_DIR> \
-  PYTHONPATH=<MADS_ROOT>/src:<MADS_ROOT>/examples \
-  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_geom_doe.py
 
 Run CTA + DUST-VLM baseline at AoA = 3 deg, 150 time steps:
 
@@ -253,11 +247,12 @@ Run CTA + DUST-VLM baseline at AoA = 3 deg, 150 time steps:
 
 Generate a fixed DOE sample table for a campaign:
 
-  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_generate_doe_samples.py \
-    --method sobol \
+  <VENV_DIR>/bin/python <MADS_ROOT>/examples/cta_dust_doe.py \
+    --generate-samples-only \
+    --sample-method sobol \
     --n-samples 5000 \
-    --seed 17 \
-    --output-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+    --sample-seed 17 \
+    --samples-csv <MADS_ROOT>/outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
 
 Run a serial shard of 50 samples from that table:
 

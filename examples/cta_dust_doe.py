@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 import shutil
 from pathlib import Path
@@ -9,7 +8,6 @@ from pathlib import Path
 import gemseo
 import numpy as np
 
-import cta_geom_doe as geometry_doe
 import cta_geometry as cta
 from multiads.assembly import Environment
 from multiads.scenario import MADSScenario
@@ -40,7 +38,17 @@ gemseo.configure_logger(
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "CTA_case" / "doe_dust"
+DEFAULT_SAMPLES_CSV = (
+    REPO_ROOT
+    / "outputs"
+    / "CTA_case"
+    / "datasets"
+    / "campaign_001_exploration"
+    / "samples"
+    / "cta_dust_vlm_samples.csv"
+)
 SUPPORTED_DUST_METHODS = ("vlm", "panels")
+SUPPORTED_SAMPLE_METHODS = ("sobol", "lhs", "halton", "random")
 
 
 def _geometry_provider():
@@ -152,7 +160,7 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
     return ResolvedGeometryDustDiscipline(
         name="CTADustFromResolvedGeometry",
         geometry_provider=_geometry_provider,
-        metric_inputs=geometry_doe.GEOMETRY_METRIC_VARIABLES,
+        metric_inputs=cta.GEOMETRY_METRIC_VARIABLES,
         output_dir=args.output_dir / "cases",
         environment=environment,
         options=options,
@@ -171,16 +179,16 @@ def build_cta_dust_doe_scenario(
 
     dust_discipline = _build_dust_discipline(args)
     mads_scenario = MADSScenario()
-    mads_scenario.fill_parameter_space(cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES)
+    mads_scenario.fill_parameter_space(cta.CTA_DOE_DESIGN_VARIABLES)
     disciplines = [
-        geometry_doe.disc_planform_mapping,
+        cta.disc_planform_mapping,
         cta.disc_geometry,
     ]
-    if geometry_doe.disc_internal_boxes is not None:
-        disciplines.append(geometry_doe.disc_internal_boxes)
+    if cta.disc_internal_boxes is not None:
+        disciplines.append(cta.disc_internal_boxes)
     disciplines.extend(
         [
-            geometry_doe.disc_geometry_validation,
+            cta.disc_geometry_validation,
             dust_discipline,
         ],
     )
@@ -210,67 +218,18 @@ def build_cta_dust_doe_scenario(
         "cta_dust_mx_reference_nm",
         "cta_dust_my_reference_nm",
         "cta_dust_mz_reference_nm",
-        *(variable.name for variable in geometry_doe.GEOMETRY_METRIC_VARIABLES),
+        *(variable.name for variable in cta.GEOMETRY_METRIC_VARIABLES),
         *(
             variable.name
-            for variable in geometry_doe.validation_result_variables
-            if variable.name != geometry_doe.geometry_valid.name
+            for variable in cta.validation_result_variables
+            if variable.name != cta.geometry_valid.name
         ),
-        *(variable.name for variable in geometry_doe.box_result_variables),
+        *(variable.name for variable in cta.box_result_variables),
     ]
     for observable in observables:
         mads_scenario.scenario.add_observable(observable)
 
     return mads_scenario, dust_discipline
-
-
-def _variable_csv_keys(variable_name: str) -> tuple[str, ...]:
-    if variable_name.startswith("cta_"):
-        return (variable_name, variable_name[4:])
-    return (variable_name,)
-
-
-def _load_sample_slice(args: argparse.Namespace) -> np.ndarray:
-    path = Path(args.samples_csv).expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Sample CSV does not exist: {path}")
-
-    with path.open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
-
-    start = max(0, int(args.sample_start))
-    if args.sample_count is None:
-        selected_rows = rows[start:]
-    else:
-        selected_rows = rows[start : start + max(0, int(args.sample_count))]
-
-    if not selected_rows:
-        msg = (
-            f"No DOE samples selected from {path} with "
-            f"sample_start={args.sample_start} and sample_count={args.sample_count}."
-        )
-        raise ValueError(msg)
-
-    samples: list[list[float]] = []
-    for row_index, row in enumerate(selected_rows, start=start):
-        sample: list[float] = []
-        for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES:
-            value: float | None = None
-            for key in _variable_csv_keys(variable.name):
-                raw_value = row.get(key)
-                if raw_value not in (None, ""):
-                    value = float(raw_value)
-                    break
-            if value is None:
-                msg = (
-                    f"Missing design variable '{variable.name}' in sample CSV row "
-                    f"{row_index}. Accepted column names: {_variable_csv_keys(variable.name)}."
-                )
-                raise ValueError(msg)
-            sample.append(value)
-        samples.append(sample)
-
-    return np.asarray(samples, dtype=float)
 
 
 def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> int:
@@ -279,7 +238,11 @@ def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> int:
         raise ValueError(msg)
 
     if args.samples_csv is not None:
-        samples = _load_sample_slice(args)
+        samples = cta.load_design_sample_slice(
+            args.samples_csv,
+            sample_start=args.sample_start,
+            sample_count=args.sample_count,
+        )
         scenario.scenario.execute(
             algo_name="CustomDOE",
             samples=samples,
@@ -287,13 +250,9 @@ def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> int:
         return int(samples.shape[0])
 
     if args.baseline_only:
-        baseline_sample = np.asarray(
-            [[float(variable.value) for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES]],
-            dtype=float,
-        )
         scenario.scenario.execute(
             algo_name="CustomDOE",
-            samples=baseline_sample,
+            samples=cta.baseline_sample(),
         )
         return 1
 
@@ -305,17 +264,7 @@ def _execute_scenario(scenario: MADSScenario, args: argparse.Namespace) -> int:
 
 
 def _design_space_rows() -> list[dict[str, float | str]]:
-    rows: list[dict[str, float | str]] = []
-    for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES:
-        rows.append(
-            {
-                "name": variable.name,
-                "baseline": float(variable.value),
-                "lower_bound": float(variable.lb),
-                "upper_bound": float(variable.ub),
-            },
-        )
-    return rows
+    return cta.design_space_rows()
 
 
 def _analysis_settings_rows(args: argparse.Namespace) -> list[list[object]]:
@@ -352,7 +301,7 @@ def _build_manifest(
         "architecture": {
             "doe_script": "examples/cta_dust_doe.py",
             "geometry_case": "examples/cta_geometry.py",
-            "geometry_mapping": "examples/cta_geom_doe.py::disc_planform_mapping",
+            "case_geometry_definition": "examples/cta_geometry.py",
             "geometry_core": "multiads.solvers.synthesis.geometry_lib",
             "dust_adapter": "multiads.solvers.aerodynamics.dust_lib.ResolvedGeometryDustDiscipline",
             "dust_geometry_bridge": "multiads.solvers.aerodynamics.dust_lib resolved-geometry runners",
@@ -398,7 +347,7 @@ def _build_manifest(
             "execution status; this is not an aerodynamic optimization target."
         ),
         "design_variables": [
-            variable.name for variable in cta.CTA_CFD_JUNE_14_DESIGN_VARIABLES
+            variable.name for variable in cta.CTA_DOE_DESIGN_VARIABLES
         ],
         "outputs": {
             "dataset_csv": str(paths.dataset_csv),
@@ -433,7 +382,10 @@ def _parse_args() -> argparse.Namespace:
         "--samples-csv",
         type=Path,
         default=None,
-        help="Run a fixed DOE sample table instead of generating samples inside GEMSEO.",
+        help=(
+            "Run a fixed DOE sample table instead of generating samples inside "
+            "GEMSEO. With --generate-samples-only, this is the output CSV."
+        ),
     )
     parser.add_argument(
         "--sample-start",
@@ -451,6 +403,23 @@ def _parse_args() -> argparse.Namespace:
         "--baseline-only",
         action="store_true",
         help="Run one CustomDOE sample at the CTA baseline instead of an LHS campaign.",
+    )
+    parser.add_argument(
+        "--generate-samples-only",
+        action="store_true",
+        help="Only generate a fixed 14-variable DOE sample CSV and exit.",
+    )
+    parser.add_argument(
+        "--sample-method",
+        choices=SUPPORTED_SAMPLE_METHODS,
+        default="sobol",
+        help="Sampling method used by --generate-samples-only.",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=17,
+        help="Random seed used by --generate-samples-only.",
     )
     parser.add_argument(
         "--dust-method",
@@ -499,6 +468,27 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     args.output_dir = args.output_dir.resolve()
+
+    if args.generate_samples_only:
+        samples_csv = (
+            Path(args.samples_csv).expanduser()
+            if args.samples_csv is not None
+            else DEFAULT_SAMPLES_CSV
+        )
+        samples_csv = samples_csv.resolve()
+        cta.write_design_samples_csv(
+            samples_csv,
+            method=args.sample_method,
+            n_samples=args.n_samples,
+            seed=args.sample_seed,
+        )
+        print("CTA DUST DOE samples generated")
+        print(f"  method = {args.sample_method}")
+        print(f"  n_samples = {args.n_samples}")
+        print(f"  seed = {args.sample_seed}")
+        print(f"  samples_csv = {samples_csv}")
+        return
+
     if args.output_dir.exists() and not args.keep_existing:
         shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)

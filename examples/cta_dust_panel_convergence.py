@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-import cta_dust_common as cta_common
+import cta_convergence_common as cta_common
 from multiads.assembly import Environment
 from multiads.solvers.aerodynamics.dust_lib import (
     DustMeshSettings,

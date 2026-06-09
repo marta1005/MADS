@@ -14,7 +14,7 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-import cta_dust_common as cta_common
+import cta_convergence_common as cta_common
 from multiads.assembly import Environment
 from multiads.solvers.aerodynamics.dust_lib import (
     DustMeshSettings,

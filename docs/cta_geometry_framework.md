@@ -24,15 +24,15 @@ CTA design variables
 -> analysis results and campaign tables
 ```
 
-There is no DUST-specific logic in `cta_geometry.py`, `cta_geom_doe.py` or `cta_laws.py`. DUST integration lives in the aerodynamics solver layer.
+There is no DUST-specific logic in `cta_geometry.py` or `cta_laws.py`. DUST integration lives in the aerodynamics solver layer.
 
 ## Main Files
 
 | File | Responsibility |
 | --- | --- |
-| `examples/cta_geometry.py` | Official CTA baseline, 14-variable CFD design space, MADS sections, resolved mesh and IGES export. |
-| `examples/cta_geom_doe.py` | Solver-independent GEMSEO geometry DoE/baseline check. Maps design variables to derived geometry parameters. |
-| `examples/cta_dust_doe.py` | GEMSEO 14-variable campaign connected to DUST through the aerodynamic adapter. |
+| `examples/cta_geometry.py` | Official CTA baseline and shared CTA geometry case definition: 14-variable design space, derived mapping, MADS sections, geometry validation, packaging checks, resolved mesh, IGES export and DOE sample tables. |
+| `examples/cta_dust_doe.py` | GEMSEO 14-variable campaign connected to DUST through the aerodynamic adapter. It can also generate the fixed campaign `samples.csv`. |
+| `examples/cta_convergence_common.py` | Shared utilities for the CTA convergence studies only. |
 | `src/multiads/solvers/synthesis/spanwise_laws.py` | Generic reusable laws: spanwise interpolation, LE/TE planform, CST profile interpolation and thickness scaling. |
 | `src/multiads/cases/cta_laws.py` | CTA-specific configuration built on top of the generic geometry laws. |
 | `src/multiads/solvers/synthesis/geometry_lib.py` | Generic geometry core: `PreparedGeometry`, section resolution, planform, resolved mesh and metrics. |
@@ -283,22 +283,6 @@ MADS/outputs/CTA_case/export/geometry/station_airfoils/
 MADS/outputs/CTA_case/export/geometry/summary.json
 ```
 
-Run the geometry-only baseline DoE/check:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/mads_mpl PYTHONPATH=../MADS/src:../MADS/examples ./.venv/bin/python ../MADS/examples/cta_geom_doe.py
-```
-
-Main outputs:
-
-```text
-MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_dataset.csv
-MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_dataset_flat.csv
-MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_design_space.csv
-MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_validation_summary.json
-MADS/outputs/CTA_case/doe_geometry/cta_geom_doe_manifest.json
-```
-
 Run the current CTA DUST baseline at `AoA = 3 deg` with 70 time steps:
 
 ```bash
@@ -357,11 +341,12 @@ table first, then let each worker run a different slice of that table.
 Generate a fixed 5,000-sample Sobol table:
 
 ```bash
-python examples/cta_generate_doe_samples.py \
-  --method sobol \
+python examples/cta_dust_doe.py \
+  --generate-samples-only \
+  --sample-method sobol \
   --n-samples 5000 \
-  --seed 17 \
-  --output-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
+  --sample-seed 17 \
+  --samples-csv outputs/CTA_case/datasets/campaign_001_exploration/samples/cta_dust_vlm_samples.csv
 ```
 
 Run the first 50 samples from that table:
@@ -408,6 +393,9 @@ Main command-line options:
 --samples-csv FILE            fixed DOE sample table for production campaigns
 --sample-start I              first row to run from --samples-csv
 --sample-count N              number of rows to run from --samples-csv
+--generate-samples-only       create the fixed samples CSV and exit
+--sample-method sobol         sampling method: sobol, lhs, halton or random
+--sample-seed 17              sampling seed
 --n-samples N                 generate samples inside GEMSEO when no CSV is supplied
 --algo LHS                    GEMSEO DOE algorithm for internal sample generation
 --dust-method vlm             DUST method: vlm or panels
