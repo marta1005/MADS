@@ -454,6 +454,7 @@ array range as a qsub directive:
 Both qsub scripts are pinned to the office-cluster RHEL8-capable queue:
 
 ```bash
+#$ -l m7j
 #$ -q m7gpus
 ```
 

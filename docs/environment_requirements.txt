@@ -274,11 +274,13 @@ The qsub array range is configured directly in the script with:
 
 On the current office cluster, both qsub scripts are pinned to:
 
+  #$ -l m7j
   #$ -q m7gpus
 
 because the DUST/Python RHEL8 environment is available on the mcn320/mcn321
-nodes behind that queue. If the cluster configuration changes, update the queue
-directive at the top of both qsub scripts.
+nodes behind that queue. The m7j resource selector must appear before the queue
+directive in both qsub scripts. If the cluster configuration changes, update the
+resource/queue directives at the top of both qsub scripts.
 
 For qsub / Grid Engine, the array range is usually 1-based. The example above
 runs 100 queue tasks for 5,000 samples with 50 samples per task. The script

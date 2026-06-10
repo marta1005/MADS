@@ -6,6 +6,7 @@
 #$ -cwd
 # Office cluster selector: this queue maps to the RHEL8-capable mcn320/mcn321 nodes.
 # Keep this active when the Python/DUST environment is only available there.
+#$ -l m7j
 #$ -q m7gpus
 
 set -euo pipefail
