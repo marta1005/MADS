@@ -252,6 +252,8 @@ class DustMeshSettings:
     mirror_span: bool = True
     span_min_y_m: float | None = None
     span_max_y_m: float | None = None
+    span_panel_refinement_start_y_m: float | None = None
+    span_panel_refinement_factor: float = 1.0
 
 
 def write_basic_two_skin_mesh_from_resolved_npz(
@@ -730,7 +732,13 @@ def _selected_parametric_stations(
     return [stations[index] for index in unique_indices]
 
 
-def _span_panel_counts(stations: Sequence[Any], total_panels: int) -> list[int]:
+def _span_panel_counts(
+    stations: Sequence[Any],
+    total_panels: int,
+    *,
+    refinement_start_y_m: float | None = None,
+    refinement_factor: float = 1.0,
+) -> list[int]:
     n_spans = len(stations) - 1
     total = max(n_spans, int(total_panels))
     y = np.asarray([float(station.spanwise_y_m) for station in stations], dtype=float)
@@ -746,6 +754,13 @@ def _span_panel_counts(stations: Sequence[Any], total_panels: int) -> list[int]:
             break
         remainder = raw[candidates] - counts[candidates]
         counts[int(candidates[np.argmin(remainder)])] -= 1
+    if refinement_start_y_m is not None and float(refinement_factor) > 1.0:
+        span_mid = 0.5 * (y[:-1] + y[1:])
+        refine = span_mid >= float(refinement_start_y_m)
+        counts[refine] = np.maximum(
+            1,
+            np.rint(counts[refine] * float(refinement_factor)).astype(int),
+        )
     return [int(value) for value in counts]
 
 
@@ -777,7 +792,12 @@ def _build_parametric_wing_from_geometry(
 ) -> tuple[assembly.Wing, dict[str, Any]]:
     stations = _selected_parametric_stations(geometry, mesh_settings)
     total_span_panels = max(1, int(mesh_settings.n_span_stations) - 1)
-    span_panels = _span_panel_counts(stations, total_span_panels)
+    span_panels = _span_panel_counts(
+        stations,
+        total_span_panels,
+        refinement_start_y_m=mesh_settings.span_panel_refinement_start_y_m,
+        refinement_factor=mesh_settings.span_panel_refinement_factor,
+    )
 
     method_label = (
         "lifting_line"
@@ -873,6 +893,12 @@ def _build_parametric_wing_from_geometry(
         "span_panel_count": int(sum(span_panels)),
         "span_panel_count_min": int(min(span_panels)),
         "span_panel_count_max": int(max(span_panels)),
+        "span_panel_refinement_start_y_m": (
+            None
+            if mesh_settings.span_panel_refinement_start_y_m is None
+            else float(mesh_settings.span_panel_refinement_start_y_m)
+        ),
+        "span_panel_refinement_factor": float(mesh_settings.span_panel_refinement_factor),
         "sweep_min_deg": float(np.min(sweep_values)),
         "sweep_max_deg": float(np.max(sweep_values)),
         "dihed_min_deg": float(np.min(dihed_values)),

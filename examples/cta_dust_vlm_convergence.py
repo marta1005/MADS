@@ -232,6 +232,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--span-curvature-weight", type=float, default=5.0)
     parser.add_argument("--chord-curvature-weight", type=float, default=3.0)
     parser.add_argument("--chord-endpoint-weight", type=float, default=0.45)
+    parser.add_argument("--span-panel-refinement-start-y-m", type=float, default=None)
+    parser.add_argument("--span-panel-refinement-factor", type=float, default=1.0)
     parser.add_argument("--loads-average-window", type=int, default=20)
     parser.add_argument("--profile-drag", choices=["none", "neuralfoil"], default="neuralfoil")
     parser.add_argument("--neuralfoil-model", default="large")
@@ -375,6 +377,8 @@ def main() -> None:
             span_curvature_weight=float(args.span_curvature_weight),
             chord_curvature_weight=float(args.chord_curvature_weight),
             chord_endpoint_weight=float(args.chord_endpoint_weight),
+            span_panel_refinement_start_y_m=args.span_panel_refinement_start_y_m,
+            span_panel_refinement_factor=float(args.span_panel_refinement_factor),
             mirror_span=True,
         )
 
