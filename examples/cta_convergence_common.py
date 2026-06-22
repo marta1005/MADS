@@ -11,6 +11,7 @@ import cta_geometry as cta
 from multiads.assembly import Environment
 from multiads.solvers.aerodynamics.dust_lib import normalize_reference_loads
 from multiads.solvers.synthesis import build_resolved_surface_mesh, write_resolved_surface_mesh_npz
+from multiads.utilities.campaign_export import write_xlsx_workbook
 from multiads.utilities.internal_volume_constraints import (
     CadReferenceFrame,
     evaluate_internal_volume_constraints,
@@ -125,6 +126,8 @@ def read_force_history(
     q_pa: float,
     s_ref_m2: float,
     c_ref_m: float,
+    environment: "Environment | None" = None,
+    alpha_deg: float = 0.0,
     component_name: str = COMPONENT_NAME,
 ) -> list[dict[str, float]]:
     path = run_dir / "post" / f"{case_name}_{component_name}_loads.dat"
@@ -142,7 +145,24 @@ def read_force_history(
             t = float(parts[0])
             force = np.asarray([float(value) for value in parts[1:4]], dtype=float)
             moment = np.asarray([float(value) for value in parts[4:7]], dtype=float)
-            normalized = normalize_reference_loads(force, moment, q_pa, s_ref_m2, c_ref_m)
+            if environment is not None:
+                normalized = normalize_reference_loads(
+                    force,
+                    moment,
+                    q_pa,
+                    s_ref_m2,
+                    c_ref_m,
+                    environment,
+                )
+            else:
+                normalized = normalize_reference_loads(
+                    force,
+                    moment,
+                    q_pa,
+                    s_ref_m2,
+                    c_ref_m,
+                    alpha_deg=alpha_deg,
+                )
             rows.append(
                 {
                     "time_s": t,
@@ -177,6 +197,20 @@ def final_window_stats(history: list[dict[str, float]], window: int) -> dict[str
         "lift_n",
         "drag_n",
         "side_n",
+        "cl_reference",
+        "cd_reference",
+        "cy_reference",
+        "ld_reference",
+        "cl_wind",
+        "cd_wind",
+        "cy_wind",
+        "ld_wind",
+        "lift_reference_n",
+        "drag_reference_n",
+        "side_reference_n",
+        "lift_wind_n",
+        "drag_wind_n",
+        "side_wind_n",
     ]
     out: dict[str, float] = {}
     for key in keys:
@@ -301,6 +335,26 @@ def final_profile_drag_window_stats(
         out[f"history_final_window_{key}_min"] = float(np.min(values))
         out[f"history_final_window_{key}_max"] = float(np.max(values))
     return out
+
+
+def write_workbook(
+    output_dir: Path,
+    filename: str,
+    result_rows: list[dict[str, Any]],
+    design_row: dict[str, float],
+    summary_rows: list[dict[str, Any]] | None = None,
+) -> None:
+    if not result_rows:
+        return
+    result_keys = list(result_rows[0])
+    sheets: dict[str, list] = {
+        "results": [result_keys, *[[row.get(key) for key in result_keys] for row in result_rows]],
+        "baseline_design": [["name", "value"], *[[k, v] for k, v in design_row.items()]],
+    }
+    if summary_rows:
+        summary_keys = list(summary_rows[0])
+        sheets["summary"] = [summary_keys, *[[row.get(key) for key in summary_keys] for row in summary_rows]]
+    write_xlsx_workbook(output_dir / filename, sheets)
 
 
 def append_csv(path: Path, row: dict[str, Any], fieldnames: list[str]) -> None:

@@ -444,6 +444,8 @@ class DUST(BaseSolver):
                     step_res=wing.options.spanwise_step,
                     components=[wing.name],
                     symmetric_geo=wing.symmetry,
+                    lifting_line_data=wing.options.spanwise_lifting_line_data,
+                    vortex_lattice_data=wing.options.spanwise_vortex_lattice_data,
                 )
         return analyses
 

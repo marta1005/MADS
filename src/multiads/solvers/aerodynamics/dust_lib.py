@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
+import math
 import os
 import shutil
 import subprocess as sp
@@ -10,7 +12,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TextIO
+
+_log = logging.getLogger(__name__)
 
 import numpy as np
 from gemseo.core.discipline import Discipline
@@ -70,7 +75,11 @@ def write_polar(polar_data: PolarVariable, file: Path) -> None:
 
         for i in range(polar_data.num_polars):
             # Extract polar data
-            mach = np.array([0.0, 2.0])
+            # DUST LL can query the c81 table at local 2D velocities well above
+            # the free-stream Mach number. The same section polar is duplicated
+            # over a very broad Mach range so diagnostic LL runs do not fail because
+            # of a table-boundary issue before the force sign can be assessed.
+            mach = np.array([0.0, 100.0])
             re = polar_data.reynolds[i]
             aoa = polar_data.aoa[i, :]
             cl = polar_data.cl[i, :]
@@ -254,6 +263,16 @@ class DustMeshSettings:
     span_max_y_m: float | None = None
     span_panel_refinement_start_y_m: float | None = None
     span_panel_refinement_factor: float = 1.0
+    span_panel_type: str = "uniform"
+    lifting_line_geometry_mode: str = "equivalent"
+    lifting_line_geometry_variant: str | None = None
+    lifting_line_effective_start_y_m: float = 12.5
+    lifting_line_outer_start_y_m: float = 22.5
+    lifting_line_transition_start_y_m: float = 12.5
+    lifting_line_root_chord_scale: float = 1.0
+    lifting_line_root_twist_deg: float | None = None
+    lifting_line_blend_root_to_start: bool = True
+    lifting_line_anchor_min_spacing_m: float = 1.5
 
 
 def write_basic_two_skin_mesh_from_resolved_npz(
@@ -435,11 +454,25 @@ class DustCaseResult:
     lift_n: float
     drag_n: float
     side_n: float
+    lift_reference_n: float
+    drag_reference_n: float
+    side_reference_n: float
+    lift_wind_n: float
+    drag_wind_n: float
+    side_wind_n: float
     cl: float
     cd: float
     cy: float
     cm: float
     ld: float
+    cl_reference: float
+    cd_reference: float
+    cy_reference: float
+    ld_reference: float
+    cl_wind: float
+    cd_wind: float
+    cy_wind: float
+    ld_wind: float
     run_dir: str
     mesh_info: dict[str, Any]
 
@@ -467,31 +500,411 @@ def dust_case_tag(alpha_deg: float) -> str:
     return f"aoa_{alpha_int:02d}" if alpha_int >= 0 else f"aoa_m{abs(alpha_int):02d}"
 
 
+def lifting_line_solver_preset(name: str = "nominal") -> dict[str, Any]:
+    """Return DUST lifting-line solver settings for a robustness preset."""
+
+    normalized = str(name).strip().lower()
+    presets: dict[str, dict[str, Any]] = {
+        "conservative": {
+            "max_iter": 500,
+            "tol": 1.0e-6,
+            "ll_solver": "GammaMethod",
+            "ll_reynolds_corrections": False,
+            "ll_reynolds_corrections_nfact": 0.2,
+            "ll_damp": 0.10,
+            "ll_stall_regularisation": True,
+            "ll_stall_regularisation_nelems": 2,
+            "ll_stall_regularizations_niters": 3,
+            "ll_stall_regularization_alpha_stall": 12.0,
+            "ll_artificial_viscosity": 0.0,
+            "ll_artificial_viscosity_adaptive": False,
+            "ll_artificial_viscosity_adaptive_alpha": 12.0,
+            "ll_artificial_viscosity_adaptive_dalpha": 4.0,
+            "ll_loads_avl": False,
+        },
+        "nominal": {
+            "max_iter": 150,
+            "tol": 1.0e-6,
+            "ll_solver": "GammaMethod",
+            "ll_reynolds_corrections": False,
+            "ll_reynolds_corrections_nfact": 0.2,
+            "ll_damp": 5.0,
+            "ll_stall_regularisation": True,
+            "ll_stall_regularisation_nelems": 1,
+            "ll_stall_regularizations_niters": 1,
+            "ll_stall_regularization_alpha_stall": 15.0,
+            "ll_artificial_viscosity": 0.0,
+            "ll_artificial_viscosity_adaptive": False,
+            "ll_artificial_viscosity_adaptive_alpha": 15.0,
+            "ll_artificial_viscosity_adaptive_dalpha": 3.0,
+            "ll_loads_avl": False,
+        },
+        "fast": {
+            "max_iter": 80,
+            "tol": 1.0e-5,
+            "ll_solver": "GammaMethod",
+            "ll_reynolds_corrections": False,
+            "ll_reynolds_corrections_nfact": 0.2,
+            "ll_damp": 3.0,
+            "ll_stall_regularisation": True,
+            "ll_stall_regularisation_nelems": 1,
+            "ll_stall_regularizations_niters": 1,
+            "ll_stall_regularization_alpha_stall": 15.0,
+            "ll_artificial_viscosity": 0.0,
+            "ll_artificial_viscosity_adaptive": False,
+            "ll_artificial_viscosity_adaptive_alpha": 15.0,
+            "ll_artificial_viscosity_adaptive_dalpha": 3.0,
+            "ll_loads_avl": False,
+        },
+    }
+    try:
+        return dict(presets[normalized])
+    except KeyError as exc:
+        msg = "lifting-line preset must be one of: conservative, nominal, fast"
+        raise ValueError(msg) from exc
+
+
 def normalize_reference_loads(
     force_reference: NDArray[np.float64],
     moment_reference: NDArray[np.float64],
     q_inf: float,
     s_ref_m2: float,
     c_ref_m: float,
+    environment: "Any | None" = None,
+    *,
+    alpha_deg: float = 0.0,
 ) -> dict[str, float]:
-    """Normalize DUST reference-axis forces and moments.
+    """Normalize DUST forces and moments using the MADS Environment rotation.
 
-    This keeps the current CTA convention: drag is ``-Fx`` and lift is ``Fz``
-    in the DUST reference axes, with no wind-axis projection.
+    DUST delivers forces in body axes (x forward, y spanwise, z up).
+    Wind-axis loads are obtained via ``Environment.matrix_body_wind``, which is
+    the canonical MADS rotation matrix (full 3-D: alpha, beta, gamma).  When an
+    ``Environment`` object is supplied the rotation is read from it directly;
+    otherwise ``alpha_deg`` is used to build a simplified pitch-only rotation.
+
+    Body-axis coefficients (``cl``, ``cd``) use Fz and -Fx without projection
+    and are kept for reference.  Wind-axis coefficients (``cl_wind``,
+    ``cd_wind``) are the physically meaningful aerodynamic coefficients.
     """
+    from multiads.assembly import Environment as _Env  # local import to avoid circular
 
-    drag_n = -float(force_reference[0])
-    side_n = float(force_reference[1])
-    lift_n = float(force_reference[2])
+    f_body = np.asarray(force_reference, dtype=float)
+    m_body = np.asarray(moment_reference, dtype=float)
+
+    if isinstance(environment, _Env):
+        # Use canonical MADS rotation: body -> wind
+        R = environment.matrix_body_wind
+    else:
+        # Fallback: build simplified pitch-only rotation from alpha_deg
+        a = np.deg2rad(float(alpha_deg))
+        ca, sa = float(np.cos(a)), float(np.sin(a))
+        R = np.array([
+            [ ca, 0.0, sa],
+            [0.0, 1.0, 0.0],
+            [-sa, 0.0, ca],
+        ])
+
+    f_wind = R @ f_body
+
+    # Wind-axis: x = drag direction (positive opposes motion), z = lift direction
+    drag_wind_n  = float(f_wind[0])
+    side_wind_n  = float(f_wind[1])
+    lift_wind_n  = float(f_wind[2])
+
+    # Body-axis reference (no projection)
+    lift_n = float(f_body[2])
+    drag_n = -float(f_body[0])
+    side_n = float(f_body[1])
+
+    reference_ld = lift_n / drag_n if abs(drag_n) > 1.0e-14 else float("nan")
+    wind_ld = lift_wind_n / drag_wind_n if abs(drag_wind_n) > 1.0e-14 else float("nan")
+
+    qs = float(q_inf) * float(s_ref_m2)
+    qsc = qs * float(c_ref_m)
     return {
         "lift_n": lift_n,
         "drag_n": drag_n,
         "side_n": side_n,
-        "cl": lift_n / (q_inf * s_ref_m2),
-        "cd": drag_n / (q_inf * s_ref_m2),
-        "cy": side_n / (q_inf * s_ref_m2),
-        "cm": float(moment_reference[1]) / (q_inf * s_ref_m2 * c_ref_m),
-        "ld": lift_n / drag_n if abs(drag_n) > 1.0e-14 else float("nan"),
+        "lift_reference_n": lift_n,
+        "drag_reference_n": drag_n,
+        "side_reference_n": side_n,
+        "lift_wind_n": lift_wind_n,
+        "drag_wind_n": drag_wind_n,
+        "side_wind_n": side_wind_n,
+        "cl": lift_n / qs,
+        "cd": drag_n / qs,
+        "cy": side_n / qs,
+        "cm": float(m_body[1]) / qsc,
+        "ld": reference_ld,
+        "cl_reference": lift_n / qs,
+        "cd_reference": drag_n / qs,
+        "cy_reference": side_n / qs,
+        "ld_reference": reference_ld,
+        "cl_wind": lift_wind_n / qs,
+        "cd_wind": drag_wind_n / qs,
+        "cy_wind": side_wind_n / qs,
+        "ld_wind": wind_ld,
+    }
+
+
+def sanitize_polar_variable(
+    polar: "PolarVariable",
+    *,
+    cd_min: float = 0.006,
+    cl_abs_max: float = 2.5,
+    cm_abs_max: float = 1.5,
+) -> dict[str, float]:
+    """Apply minimal physical guards to a DUST ``.c81`` polar input."""
+
+    cl = np.asarray(polar.cl, dtype=float)
+    cd = np.asarray(polar.cd, dtype=float)
+    cm = np.asarray(polar.cm, dtype=float)
+    cd_before_min = float(np.nanmin(cd)) if cd.size else float("nan")
+    cl_before_min = float(np.nanmin(cl)) if cl.size else float("nan")
+    cl_before_max = float(np.nanmax(cl)) if cl.size else float("nan")
+    cm_before_min = float(np.nanmin(cm)) if cm.size else float("nan")
+    cm_before_max = float(np.nanmax(cm)) if cm.size else float("nan")
+
+    polar.cl = np.clip(np.nan_to_num(cl, nan=0.0), -float(cl_abs_max), float(cl_abs_max))
+    polar.cd = np.maximum(np.nan_to_num(cd, nan=float(cd_min)), float(cd_min))
+    polar.cm = np.clip(np.nan_to_num(cm, nan=0.0), -float(cm_abs_max), float(cm_abs_max))
+    return {
+        "polar_cd_before_min": cd_before_min,
+        "polar_cd_after_min": float(np.nanmin(polar.cd)) if polar.cd.size else float("nan"),
+        "polar_cd_clipped_count": float(np.count_nonzero(cd < float(cd_min))),
+        "polar_cl_before_min": cl_before_min,
+        "polar_cl_before_max": cl_before_max,
+        "polar_cl_after_min": float(np.nanmin(polar.cl)) if polar.cl.size else float("nan"),
+        "polar_cl_after_max": float(np.nanmax(polar.cl)) if polar.cl.size else float("nan"),
+        "polar_cm_before_min": cm_before_min,
+        "polar_cm_before_max": cm_before_max,
+        "polar_cm_after_min": float(np.nanmin(polar.cm)) if polar.cm.size else float("nan"),
+        "polar_cm_after_max": float(np.nanmax(polar.cm)) if polar.cm.size else float("nan"),
+    }
+
+
+def compute_reconstructed_drag_coefficients(
+    *,
+    cl: float,
+    cd_profile: float,
+    ar_eff: float,
+    e_eff: float = 0.75,
+) -> dict[str, float]:
+    """Reconstruct positive profile + induced drag for LL diagnostics."""
+
+    ar = max(float(ar_eff), 1.0e-12)
+    oswald = max(float(e_eff), 1.0e-12)
+    cd_induced = float(cl) ** 2 / (np.pi * ar * oswald)
+    cd_total = max(0.0, float(cd_profile)) + cd_induced
+    return {
+        "cd_profile_reconstructed": max(0.0, float(cd_profile)),
+        "cd_induced_reconstructed": float(cd_induced),
+        "cd_reconstructed": float(cd_total),
+        "ld_reconstructed": float(cl) / cd_total if cd_total > 1.0e-14 else float("nan"),
+        "ar_eff": float(ar),
+        "e_eff": float(oswald),
+    }
+
+
+def _prandtl_glauert_scale(mach_base: float, mach_target: float) -> float:
+    """Return the Prandtl-Glauert CL/CM scale factor beta_base / beta_target."""
+    beta_base = math.sqrt(max(1.0 - mach_base**2, 1.0e-6))
+    beta_target = math.sqrt(max(1.0 - mach_target**2, 1.0e-6))
+    return beta_base / beta_target
+
+
+def build_neuralfoil_polar_provider(
+    *,
+    source: str = "neuralfoil",
+    model: str = "large",
+    n_crit: float = 9.0,
+    sanitize: bool = True,
+    cd_min: float = 0.006,
+    mach_polar: float | None = None,
+    diagnostics: "dict[str, float] | None" = None,
+) -> "Callable[[assembly.Environment, assembly.Wing, Mapping[str, PolarVariable]], None]":
+    """Return a polar-provider callback suitable for lifting-line DUST cases.
+
+    The returned callable has the signature expected by
+    ``run_dust_lifting_line_case_from_prepared_geometry`` and
+    ``ResolvedGeometryDustDiscipline`` (when ``polar_provider`` is supplied).
+
+    Parameters
+    ----------
+    source:
+        ``"neuralfoil"`` uses NeuralFoil to compute section polars from the
+        resolved airfoil geometry.  ``"synthetic"`` uses a thin-airfoil
+        approximation (useful for fast sanity checks).
+    model:
+        NeuralFoil model size — ``"large"``, ``"medium"``, or ``"small"``.
+    n_crit:
+        Transition criterion (n-factor).  9 corresponds to a clean tunnel.
+    sanitize:
+        Apply physical guards via ``sanitize_polar_variable`` after computing
+        each section polar.
+    cd_min:
+        Minimum CD floor applied when ``sanitize=True``.
+    mach_polar:
+        Mach number at which NeuralFoil evaluates the polars.  When set, a
+        Prandtl-Glauert correction scales CL and CM from ``mach_polar`` to the
+        flight Mach, and CD_pressure is scaled by the same factor while
+        CD_friction (estimated as ``cd_min``) is left unchanged.  Use 0.4 for
+        transonic flight conditions (M≈0.8) where NeuralFoil is unreliable.
+        When ``None`` (default) NeuralFoil runs at the actual flight Mach.
+    diagnostics:
+        Optional dict that is updated in-place with per-call polar statistics
+        (cd/cl min/max, clipped count, warning flag).  Useful for convergence
+        studies and DOE quality checks.
+    """
+
+    if source not in ("neuralfoil", "synthetic"):
+        msg = f"source must be 'neuralfoil' or 'synthetic', got '{source}'."
+        raise ValueError(msg)
+
+    def _provider(
+        env: assembly.Environment,
+        wing: assembly.Wing,
+        polars: "Mapping[str, PolarVariable]",
+    ) -> None:
+        from multiads.scenario.polars import POLAR_DEFAULT_AOA  # local to avoid circular import
+        from multiads.solvers.aerodynamics.neuralfoil import Neuralfoil
+
+        alphas = np.asarray(POLAR_DEFAULT_AOA, dtype=float)
+        mach_flight = float(env.mach)
+        speed = float(env.speed)
+        kin_viscosity = max(float(env.kin_viscosity), 1.0e-14)
+
+        # Mach at which NeuralFoil runs; may differ from flight Mach.
+        mach_nf = float(mach_polar) if mach_polar is not None else mach_flight
+        # Speed for Reynolds: use flight speed (viscous Re matches real conditions).
+        pg_scale = _prandtl_glauert_scale(mach_nf, mach_flight) if mach_polar is not None else 1.0
+
+        cd_min_seen: list[float] = []
+        cd_clipped = 0.0
+        cl_min_seen: list[float] = []
+        cl_max_seen: list[float] = []
+
+        for section in wing.sections:
+            polar = polars[f"{section.name}.polar"]
+            reynolds = speed * float(section.chord) / kin_viscosity
+
+            if source == "synthetic":
+                alpha_rad = np.radians(alphas)
+                cl = np.clip(2.0 * np.pi * alpha_rad, -1.45, 1.45)
+                cd = float(cd_min) + 0.012 * cl**2
+                cm = np.zeros_like(cl)
+                polar.mach = np.array([mach_flight])
+                polar.reynolds = np.array([reynolds])
+                polar.aoa = alphas
+                polar.cl = cl
+                polar.cd = cd
+                polar.cm = cm
+            else:
+                airfoil = Neuralfoil.make_airfoil(section.airfoil)
+                Neuralfoil._compute_airfoil(
+                    airfoil,
+                    alphas,
+                    mach_nf,
+                    reynolds,
+                    model,
+                    polar,
+                )
+                if mach_polar is not None:
+                    # Prandtl-Glauert: scale CL and CM by beta_base/beta_target.
+                    # CD: split into friction (cd_min, incompressible) + pressure remainder.
+                    cd_arr = np.asarray(polar.cd, dtype=float)
+                    cd_friction = float(cd_min)
+                    cd_pressure = np.maximum(cd_arr - cd_friction, 0.0)
+                    polar.cl = np.asarray(polar.cl, dtype=float) * pg_scale
+                    polar.cm = np.asarray(polar.cm, dtype=float) * pg_scale
+                    polar.cd = cd_friction + cd_pressure * pg_scale
+
+            if sanitize:
+                diag = sanitize_polar_variable(polar, cd_min=float(cd_min))
+            else:
+                diag = {
+                    "polar_cd_before_min": float(np.nanmin(polar.cd)),
+                    "polar_cd_after_min": float(np.nanmin(polar.cd)),
+                    "polar_cd_clipped_count": 0.0,
+                    "polar_cl_after_min": float(np.nanmin(polar.cl)),
+                    "polar_cl_after_max": float(np.nanmax(polar.cl)),
+                }
+
+            cd_min_seen.append(float(diag["polar_cd_after_min"]))
+            cd_clipped += float(diag["polar_cd_clipped_count"])
+            cl_min_seen.append(float(diag["polar_cl_after_min"]))
+            cl_max_seen.append(float(diag["polar_cl_after_max"]))
+
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "polar_source": source,
+                    "polar_sanitized": 1.0 if sanitize else 0.0,
+                    "polar_cd_min_floor": float(cd_min),
+                    "polar_cd_min_after": float(np.min(cd_min_seen)) if cd_min_seen else float("nan"),
+                    "polar_cd_clipped_count": float(cd_clipped),
+                    "polar_cl_min_after": float(np.min(cl_min_seen)) if cl_min_seen else float("nan"),
+                    "polar_cl_max_after": float(np.max(cl_max_seen)) if cl_max_seen else float("nan"),
+                    "polar_warning_flag": 1.0 if cd_clipped > 0.0 else 0.0,
+                },
+            )
+
+    return _provider
+
+
+def validate_lifting_line_case(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return acceptance flags for a single LL diagnostic row."""
+
+    def val(name: str, default: float = float("nan")) -> float:
+        try:
+            item = row.get(name, default)
+            return float(item) if item not in ("", None) else default
+        except Exception:
+            return default
+
+    cl = val("history_final_window_cl_wind_mean", val("cl_wind", val("cl", 0.0)))
+    cd_wind = val("history_final_window_cd_wind_mean", val("cd_wind", val("cd", float("nan"))))
+    cd_reconstructed = val("cd_reconstructed", float("nan"))
+    cl_std = val("history_final_window_cl_wind_std", 0.0)
+    cd_std = val("history_final_window_cd_wind_std", 0.0)
+    polar_warning = val("polar_warning_flag", 0.0) > 0.5
+    positive_wind_drag = math.isfinite(cd_wind) and cd_wind > 0.0
+    reconstructed_available = math.isfinite(cd_reconstructed) and cd_reconstructed > 0.0
+    force_history_stable = (
+        math.isfinite(cl_std)
+        and math.isfinite(cd_std)
+        and cl_std <= max(0.25, 1.50 * abs(cl))
+        and cd_std <= max(0.05, 1.50 * abs(cd_wind))
+    )
+    accepted = cl > 0.0 and positive_wind_drag and force_history_stable and not polar_warning
+    if accepted:
+        reason = "accepted"
+    elif not cl > 0.0:
+        reason = "CL is not positive at positive AoA"
+    elif not positive_wind_drag and reconstructed_available:
+        reason = "negative wind-axis drag; reconstructed drag available for diagnostics only"
+    elif not positive_wind_drag:
+        reason = "negative/invalid wind-axis drag"
+    elif not force_history_stable:
+        reason = "unstable final-window force history"
+    elif polar_warning:
+        reason = "polar range or sanitization warning"
+    else:
+        reason = "unknown LL diagnostic rejection"
+    return {
+        "ll_case_accepted": 1.0 if accepted else 0.0,
+        "ll_case_rejection_reason": reason,
+        "drag_source": (
+            "dust_wind"
+            if math.isfinite(cd_wind) and cd_wind > 0.0
+            else "reconstructed"
+            if math.isfinite(cd_reconstructed) and cd_reconstructed > 0.0
+            else "invalid"
+        ),
+        "ll_reconstructed_drag_available": (
+            1.0 if reconstructed_available else 0.0
+        ),
+        "ll_force_history_stable": 1.0 if force_history_stable else 0.0,
     }
 
 
@@ -732,6 +1145,260 @@ def _selected_parametric_stations(
     return [stations[index] for index in unique_indices]
 
 
+def _select_evenly_spaced_station_subset(
+    stations: Sequence[Any],
+    count: int,
+) -> list[Any]:
+    count = min(len(stations), max(2, int(count)))
+    indices = np.rint(np.linspace(0, len(stations) - 1, count)).astype(int)
+    unique_indices: list[int] = []
+    for index in indices:
+        if int(index) not in unique_indices:
+            unique_indices.append(int(index))
+    return [stations[index] for index in unique_indices]
+
+
+def _is_named_anchor_station(station: Any) -> bool:
+    """Return true for user-defined stations, false for dense derived stations."""
+
+    name = str(getattr(station, "name", "")).strip().lower()
+    if not name:
+        return False
+    return "_station_" not in name and "station_" not in name
+
+
+def _select_anchor_spaced_station_subset(
+    stations: Sequence[Any],
+    count: int,
+    *,
+    min_spacing_m: float,
+) -> list[Any]:
+    """Select a stable LL subset using named anchors and spanwise spacing.
+
+    A resolved BWB surface can contain many helper stations clustered near the
+    centerbody nose. Those are useful for CAD surface resolution, but they create
+    near-zero LL elements with very large chord if passed directly to DUST. This
+    selector keeps the real/user-defined stations and fills the remaining budget
+    with well-spaced stations in physical ``y`` space.
+    """
+
+    if len(stations) < 2:
+        return list(stations)
+
+    target_count = min(len(stations), max(2, int(count)))
+    y = np.asarray([float(station.spanwise_y_m) for station in stations], dtype=float)
+    min_spacing = max(0.0, float(min_spacing_m))
+    selected: set[int] = {0, len(stations) - 1}
+    selected.update(
+        index
+        for index, station in enumerate(stations)
+        if _is_named_anchor_station(station)
+    )
+
+    target_count = max(target_count, len(selected))
+    target_y = np.linspace(float(y[0]), float(y[-1]), target_count)
+    for value in target_y:
+        if len(selected) >= target_count:
+            break
+        index = int(np.argmin(np.abs(y - value)))
+        if index in selected:
+            continue
+        if all(abs(float(y[index] - y[other])) >= min_spacing for other in selected):
+            selected.add(index)
+
+    if len(selected) < target_count:
+        candidates = [
+            index
+            for index in range(len(stations))
+            if index not in selected
+        ]
+        candidates.sort(
+            key=lambda index: min(abs(float(y[index] - y[other])) for other in selected),
+            reverse=True,
+        )
+        for index in candidates:
+            if len(selected) >= target_count:
+                break
+            distance = min(abs(float(y[index] - y[other])) for other in selected)
+            if distance >= min_spacing:
+                selected.add(index)
+
+    return [stations[index] for index in sorted(selected)]
+
+
+def _collapsed_centerbody_station(
+    stations: list[Any],
+    centerbody_end_y_m: float,
+) -> Any:
+    """Build a single equivalent LL station that represents the centerbody (y=0 to end_y).
+
+    The equivalent chord is the mean aerodynamic chord (MAC) of the centerbody computed
+    as a trapezoid-integrated area divided by the centerbody span:
+        c_equiv = integral_0^{end_y} c(y) dy  /  end_y
+
+    This ensures b/(1*c_equiv) >= 0.1 for the collapsed centerbody panel as long as
+    end_y / c_equiv >= 0.1, which is satisfied for the CTA geometry (0.249 at s3).
+
+    The airfoil geometry is taken from the station nearest to end_y (the transition
+    station), so the aerodynamic section used for the polar is representative of the
+    inboard wing rather than the very wide nose of the centerbody.
+    """
+    cb_stations = [s for s in stations if float(s.spanwise_y_m) <= centerbody_end_y_m + 1.0e-6]
+    if len(cb_stations) < 2:
+        return stations[0]
+    y = np.asarray([float(s.spanwise_y_m) for s in cb_stations], dtype=float)
+    c = np.asarray([float(s.chord_m) for s in cb_stations], dtype=float)
+    b_cb = float(y[-1] - y[0])
+    c_equiv = float(np.trapezoid(c, y)) / max(b_cb, 1.0e-12)
+    anchor = cb_stations[-1]
+    first = cb_stations[0]
+    qc_x = float(anchor.leading_edge_x_m) + 0.25 * float(anchor.chord_m)
+    return SimpleNamespace(
+        name="ll_centerbody_collapsed",
+        spanwise_y_m=0.0,
+        leading_edge_x_m=float(qc_x - 0.25 * c_equiv),
+        leading_edge_z_m=float(first.leading_edge_z_m),
+        chord_m=float(c_equiv),
+        twist_deg=float(first.twist_deg),
+        x_over_c=np.asarray(anchor.x_over_c, dtype=float).copy(),
+        upper_z_over_c=np.asarray(anchor.upper_z_over_c, dtype=float).copy(),
+        lower_z_over_c=np.asarray(anchor.lower_z_over_c, dtype=float).copy(),
+    )
+
+
+def _synthetic_lifting_line_root_station(
+    first_station: Any,
+    mesh_settings: DustMeshSettings,
+) -> Any:
+    root_chord = max(
+        1.0e-6,
+        float(first_station.chord_m) * float(mesh_settings.lifting_line_root_chord_scale),
+    )
+    root_twist = (
+        float(first_station.twist_deg)
+        if mesh_settings.lifting_line_root_twist_deg is None
+        else float(mesh_settings.lifting_line_root_twist_deg)
+    )
+    first_qc_x = float(first_station.leading_edge_x_m) + 0.25 * float(
+        first_station.chord_m,
+    )
+    root_le_x = first_qc_x - 0.25 * root_chord
+    return SimpleNamespace(
+        name="ll_root_equivalent",
+        spanwise_y_m=0.0,
+        leading_edge_x_m=float(root_le_x),
+        leading_edge_z_m=float(first_station.leading_edge_z_m),
+        chord_m=float(root_chord),
+        twist_deg=float(root_twist),
+        x_over_c=np.asarray(first_station.x_over_c, dtype=float).copy(),
+        upper_z_over_c=np.asarray(first_station.upper_z_over_c, dtype=float).copy(),
+        lower_z_over_c=np.asarray(first_station.lower_z_over_c, dtype=float).copy(),
+    )
+
+
+def _selected_lifting_line_stations(
+    geometry: PreparedGeometry,
+    mesh_settings: DustMeshSettings,
+) -> list[Any]:
+    variant = (
+        mesh_settings.lifting_line_geometry_variant
+        if mesh_settings.lifting_line_geometry_variant is not None
+        else mesh_settings.lifting_line_geometry_mode
+    )
+    mode = str(variant).strip().lower()
+    if mode in {"resolved", "full", "raw"}:
+        return _selected_parametric_stations(geometry, mesh_settings)
+    if mode not in {
+        "equivalent",
+        "ll_equivalent",
+        "effective",
+        "full_bwb_equivalent",
+        "full_bwb_anchor_equivalent",
+        "full_bwb_smooth_equivalent",
+        "full_equivalent",
+        "full_anchor_equivalent",
+        "transition_outer",
+        "outer_only",
+        "calibrated_outer",
+        "centerbody_collapsed",
+    }:
+        msg = (
+            "lifting_line_geometry_mode/variant must be one of 'full_bwb_equivalent', "
+            "'full_bwb_anchor_equivalent', 'outer_only', 'transition_outer', "
+            "'calibrated_outer', 'centerbody_collapsed', 'equivalent' or 'resolved'; "
+            f"got {variant!r}"
+        )
+        raise ValueError(msg)
+
+    stations = sorted(
+        geometry.resolved_stations,
+        key=lambda station: float(station.spanwise_y_m),
+    )
+    if mesh_settings.span_max_y_m is not None:
+        stations = [
+            station
+            for station in stations
+            if float(station.spanwise_y_m) <= float(mesh_settings.span_max_y_m)
+        ]
+    if mode in {"outer_only", "calibrated_outer"}:
+        start_y = float(mesh_settings.lifting_line_outer_start_y_m)
+    elif mode in {"transition_outer", "centerbody_collapsed"}:
+        start_y = float(mesh_settings.lifting_line_transition_start_y_m)
+    elif mode in {
+        "full_bwb_equivalent",
+        "full_bwb_anchor_equivalent",
+        "full_bwb_smooth_equivalent",
+        "full_equivalent",
+        "full_anchor_equivalent",
+    }:
+        start_y = 0.0
+    else:
+        start_y = float(mesh_settings.lifting_line_effective_start_y_m)
+    if mesh_settings.span_min_y_m is not None:
+        start_y = max(start_y, float(mesh_settings.span_min_y_m))
+    effective_stations = [
+        station
+        for station in stations
+        if float(station.spanwise_y_m) >= start_y
+    ]
+    if len(effective_stations) < 2:
+        msg = (
+            "Equivalent lifting-line geometry needs at least two effective stations "
+            f"above y={start_y:g} m."
+        )
+        raise ValueError(msg)
+
+    if mode == "centerbody_collapsed":
+        count_without_root = max(2, int(mesh_settings.n_span_stations) - 1)
+        outer_selected = _select_evenly_spaced_station_subset(
+            effective_stations,
+            count_without_root,
+        )
+        cb_station = _collapsed_centerbody_station(stations, centerbody_end_y_m=start_y)
+        selected = [cb_station, *outer_selected]
+        return selected
+    if mode in {
+        "full_bwb_anchor_equivalent",
+        "full_bwb_smooth_equivalent",
+        "full_anchor_equivalent",
+    }:
+        selected = _select_anchor_spaced_station_subset(
+            effective_stations,
+            max(2, int(mesh_settings.n_span_stations)),
+            min_spacing_m=float(mesh_settings.lifting_line_anchor_min_spacing_m),
+        )
+    else:
+        count_without_root = max(2, int(mesh_settings.n_span_stations) - 1)
+        selected = _select_evenly_spaced_station_subset(
+            effective_stations,
+            count_without_root,
+        )
+    first_y = float(selected[0].spanwise_y_m)
+    if mesh_settings.lifting_line_blend_root_to_start and first_y > 1.0e-8:
+        selected = [_synthetic_lifting_line_root_station(selected[0], mesh_settings), *selected]
+    return selected
+
+
 def _span_panel_counts(
     stations: Sequence[Any],
     total_panels: int,
@@ -764,6 +1431,30 @@ def _span_panel_counts(
     return [int(value) for value in counts]
 
 
+def _span_panel_type_from_string(value: str | SpanPanelType) -> SpanPanelType:
+    if isinstance(value, SpanPanelType):
+        return value
+    normalized = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "uniform": SpanPanelType.UNIFORM,
+        "cosine": SpanPanelType.COSINE,
+        "cosine_ib": SpanPanelType.COSINE_IB,
+        "cosineib": SpanPanelType.COSINE_IB,
+        "cosine_ob": SpanPanelType.COSINE_OB,
+        "cosineob": SpanPanelType.COSINE_OB,
+        "equalarea": SpanPanelType.EQUALAREA,
+        "equal_area": SpanPanelType.EQUALAREA,
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        msg = (
+            "span_panel_type must be one of: uniform, cosine, cosine_ib, "
+            "cosine_ob, equalarea"
+        )
+        raise ValueError(msg) from exc
+
+
 def _station_airfoil_coordinates(station: Any) -> np.ndarray:
     order = np.argsort(np.asarray(station.x_over_c, dtype=float))
     x = np.asarray(station.x_over_c, dtype=float)[order]
@@ -782,6 +1473,35 @@ def _write_station_airfoil_dat(station: Any, path: Path) -> None:
         np.savetxt(stream, coords, fmt="%.10e")
 
 
+def _validate_lifting_line_polars(
+    polars: Mapping[str, "PolarVariable"],
+    environment: assembly.Environment,
+) -> None:
+    alpha = float(environment.alpha)
+    errors: list[str] = []
+    for name, polar in polars.items():
+        arrays = {
+            "mach": np.asarray(polar.mach, dtype=float),
+            "reynolds": np.asarray(polar.reynolds, dtype=float),
+            "aoa": np.asarray(polar.aoa, dtype=float),
+            "cl": np.asarray(polar.cl, dtype=float),
+            "cd": np.asarray(polar.cd, dtype=float),
+            "cm": np.asarray(polar.cm, dtype=float),
+        }
+        for label, values in arrays.items():
+            if not np.all(np.isfinite(values)):
+                errors.append(f"{name}: non-finite {label} values")
+        aoa = arrays["aoa"]
+        if aoa.size and (float(np.nanmin(aoa)) > alpha or float(np.nanmax(aoa)) < alpha):
+            errors.append(
+                f"{name}: AoA table [{float(np.nanmin(aoa)):g}, "
+                f"{float(np.nanmax(aoa)):g}] deg does not include alpha={alpha:g} deg",
+            )
+    if errors:
+        msg = "Invalid lifting-line airfoil polar table inputs:\n- " + "\n- ".join(errors)
+        raise ValueError(msg)
+
+
 def _build_parametric_wing_from_geometry(
     geometry: PreparedGeometry,
     run_path: Path,
@@ -790,7 +1510,11 @@ def _build_parametric_wing_from_geometry(
     mesh_settings: DustMeshSettings,
     wing_options: WingOptions,
 ) -> tuple[assembly.Wing, dict[str, Any]]:
-    stations = _selected_parametric_stations(geometry, mesh_settings)
+    stations = (
+        _selected_lifting_line_stations(geometry, mesh_settings)
+        if wing_options.method is WingMethod.LIFTING_LINE
+        else _selected_parametric_stations(geometry, mesh_settings)
+    )
     total_span_panels = max(1, int(mesh_settings.n_span_stations) - 1)
     span_panels = _span_panel_counts(
         stations,
@@ -798,6 +1522,7 @@ def _build_parametric_wing_from_geometry(
         refinement_start_y_m=mesh_settings.span_panel_refinement_start_y_m,
         refinement_factor=mesh_settings.span_panel_refinement_factor,
     )
+    span_panel_type = _span_panel_type_from_string(mesh_settings.span_panel_type)
 
     method_label = (
         "lifting_line"
@@ -846,7 +1571,7 @@ def _build_parametric_wing_from_geometry(
                 dihed=dihed,
                 options=[
                     SpanOptions(
-                        panel_type=SpanPanelType.UNIFORM,
+                        panel_type=span_panel_type,
                         num_panels=int(panels),
                     ),
                 ],
@@ -866,20 +1591,78 @@ def _build_parametric_wing_from_geometry(
             ],
             dtype=float,
         ),
+        xc_ref=0.0 if wing_options.method is WingMethod.LIFTING_LINE else 0.25,
         options=[wing_options],
     )
+    station_y = np.asarray([float(station.spanwise_y_m) for station in stations], dtype=float)
+    station_chord = np.asarray([float(station.chord_m) for station in stations], dtype=float)
+    half_area = float(np.trapezoid(station_chord, station_y))
+    full_area = 2.0 * half_area if bool(wing.symmetry) else half_area
+    full_span = 2.0 * float(np.max(np.abs(station_y))) if bool(wing.symmetry) else float(
+        np.max(station_y) - np.min(station_y),
+    )
+    ar_eff = full_span**2 / full_area if full_area > 1.0e-12 else float("nan")
     mesh_info = {
         "surface_type": "parametric_resolved_sections",
         "parametric_method": str(wing_options.method.name.lower()),
+        "lifting_line_geometry_mode": (
+            str(mesh_settings.lifting_line_geometry_mode)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
+        "lifting_line_geometry_variant": (
+            str(
+                mesh_settings.lifting_line_geometry_variant
+                if mesh_settings.lifting_line_geometry_variant is not None
+                else mesh_settings.lifting_line_geometry_mode
+            )
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
+        "lifting_line_effective_start_y_m": (
+            float(mesh_settings.lifting_line_effective_start_y_m)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
+        "lifting_line_outer_start_y_m": (
+            float(mesh_settings.lifting_line_outer_start_y_m)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
+        "lifting_line_transition_start_y_m": (
+            float(mesh_settings.lifting_line_transition_start_y_m)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
+        "lifting_line_anchor_min_spacing_m": (
+            float(mesh_settings.lifting_line_anchor_min_spacing_m)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else None
+        ),
         "n_sections": int(len(sections)),
         "n_half_span_sections": int(len(sections)),
         "n_chord_stations": int(mesh_settings.n_chord_stations),
         "n_chord_panels": int(max(1, mesh_settings.n_chord_stations - 1)),
-        "n_elements": int(max(1, mesh_settings.n_chord_stations - 1) * sum(span_panels)),
+        "n_elements": int(
+            sum(span_panels)
+            if wing_options.method is WingMethod.LIFTING_LINE
+            else max(1, mesh_settings.n_chord_stations - 1) * sum(span_panels)
+        ),
         "span_spacing": mesh_settings.span_spacing,
         "chord_spacing": mesh_settings.chord_spacing,
+        "span_panel_type": span_panel_type.value,
+        "reference_line_chord_fraction_before_dust_ll_shift": (
+            0.0 if wing_options.method is WingMethod.LIFTING_LINE else 0.25
+        ),
+        "dust_lifting_line_chord_fraction": (
+            0.25 if wing_options.method is WingMethod.LIFTING_LINE else None
+        ),
         "span_mirrored": False,
         "mesh_symmetry": True,
+        "lifting_line_half_span_m": float(np.max(station_y)),
+        "lifting_line_full_span_m": float(full_span),
+        "lifting_line_equivalent_area_m2": float(full_area),
+        "lifting_line_ar_eff": float(ar_eff),
         "span_min_y_m": (
             float(mesh_settings.span_min_y_m)
             if mesh_settings.span_min_y_m is not None
@@ -893,6 +1676,32 @@ def _build_parametric_wing_from_geometry(
         "span_panel_count": int(sum(span_panels)),
         "span_panel_count_min": int(min(span_panels)),
         "span_panel_count_max": int(max(span_panels)),
+        "min_span_segment_length_m": float(
+            np.min(
+                np.diff(
+                    np.asarray([float(station.spanwise_y_m) for station in stations]),
+                ),
+            ),
+        ),
+        "max_span_segment_length_m": float(
+            np.max(
+                np.diff(
+                    np.asarray([float(station.spanwise_y_m) for station in stations]),
+                ),
+            ),
+        ),
+        "chord_min_m": float(
+            np.min([float(station.chord_m) for station in stations]),
+        ),
+        "chord_max_m": float(
+            np.max([float(station.chord_m) for station in stations]),
+        ),
+        "twist_min_deg": float(
+            np.min([float(station.twist_deg) for station in stations]),
+        ),
+        "twist_max_deg": float(
+            np.max([float(station.twist_deg) for station in stations]),
+        ),
         "span_panel_refinement_start_y_m": (
             None
             if mesh_settings.span_panel_refinement_start_y_m is None
@@ -1002,6 +1811,7 @@ def run_dust_case_from_resolved_npz(
         q_inf,
         float(s_ref_m2),
         float(c_ref_m),
+        env,
     )
     result = DustCaseResult(
         alpha_deg=float(env.alpha),
@@ -1169,6 +1979,9 @@ def _run_dust_parametric_case_from_prepared_geometry(
         mesh_settings=mesh_settings,
         wing_options=resolved_wing_options,
     )
+    if method is WingMethod.LIFTING_LINE and polar_provider is None:
+        msg = "DUST lifting-line cases require a section polar provider for .c81 tables."
+        raise RuntimeError(msg)
 
     dust_solver = DUST(options=case_options)
     components = dust_solver.parse_variables([env, wing])
@@ -1177,6 +1990,8 @@ def _run_dust_parametric_case_from_prepared_geometry(
             msg = "DUST did not allocate polar inputs for the parametric wing."
             raise RuntimeError(msg)
         polar_provider(env, wing, dust_solver.polars)
+        if method is WingMethod.LIFTING_LINE:
+            _validate_lifting_line_polars(dust_solver.polars, env)
     dust_solver.run(components)
     dust_solver.compute_output()
     _remove_duplicate_dust_output_dirs(run_path, case_options.output_dir)
@@ -1206,6 +2021,7 @@ def _run_dust_parametric_case_from_prepared_geometry(
         q_inf,
         float(s_ref_m2),
         float(c_ref_m),
+        env,
     )
     result = DustCaseResult(
         alpha_deg=float(env.alpha),
@@ -1289,6 +2105,7 @@ class ResolvedGeometryDustDiscipline(Discipline):
         options: Options,
         wing_options: WingOptions | None = None,
         mesh_settings: DustMeshSettings | None = None,
+        polar_provider: "Callable[[assembly.Environment, assembly.Wing, Mapping[str, PolarVariable]], None] | None" = None,
         reference_area_name: str = "cta_wing.planform_area_m2",
         reference_chord_name: str = "cta_wing.mean_aerodynamic_chord_m",
         output_prefix: str = "cta_dust",
@@ -1306,6 +2123,7 @@ class ResolvedGeometryDustDiscipline(Discipline):
             copy.deepcopy(wing_options) if wing_options is not None else None
         )
         self.mesh_settings = mesh_settings or DustMeshSettings()
+        self.polar_provider = polar_provider
         self.reference_area_name = reference_area_name
         self.reference_chord_name = reference_chord_name
         self.output_prefix = str(output_prefix)
@@ -1382,12 +2200,25 @@ class ResolvedGeometryDustDiscipline(Discipline):
                     result_file_name=f"{self.output_prefix}_result.json",
                 )
             elif wing_method is WingMethod.LIFTING_LINE:
-                msg = (
-                    "ResolvedGeometryDustDiscipline cannot run lifting-line cases "
-                    "without a section polar provider. Use the dedicated lifting-line "
-                    "convergence script when polar coupling is required."
+                if self.polar_provider is None:
+                    msg = (
+                        "ResolvedGeometryDustDiscipline: wing_options.method is "
+                        "LIFTING_LINE but no polar_provider was supplied. "
+                        "Pass polar_provider=build_neuralfoil_polar_provider() "
+                        "when constructing the discipline."
+                    )
+                    raise RuntimeError(msg)
+                result = run_dust_lifting_line_case_from_prepared_geometry(
+                    geometry,
+                    environment=self.environment,
+                    options=case_options,
+                    s_ref_m2=s_ref,
+                    c_ref_m=c_ref,
+                    mesh_settings=self.mesh_settings,
+                    wing_options=case_wing_options,
+                    polar_provider=self.polar_provider,
+                    result_file_name=f"{self.output_prefix}_result.json",
                 )
-                raise RuntimeError(msg)
             else:
                 result = run_dust_case_from_prepared_geometry(
                     geometry,
@@ -1418,6 +2249,11 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 f"{self.output_prefix}_mz_reference_nm": result.mz_reference_nm,
             }
         except Exception as exc:  # noqa: BLE001
+            _log.exception(
+                "DUST case '%s' failed: %s",
+                self.output_prefix,
+                exc,
+            )
             if self.fail_fast:
                 raise
             case_dir.mkdir(parents=True, exist_ok=True)
@@ -1491,6 +2327,19 @@ class Options(SolverOptions):
         multipole_degree: int = 2,
         max_iter: int = 100,
         tol: float = 1e-6,
+        ll_solver: str = "GammaMethod",
+        ll_reynolds_corrections: bool = False,
+        ll_reynolds_corrections_nfact: float = 0.2,
+        ll_damp: float = 5.0,
+        ll_stall_regularisation: bool = True,
+        ll_stall_regularisation_nelems: int = 1,
+        ll_stall_regularizations_niters: int = 1,
+        ll_stall_regularization_alpha_stall: float = 15.0,
+        ll_artificial_viscosity: float = 0.0,
+        ll_artificial_viscosity_adaptive: bool = False,
+        ll_artificial_viscosity_adaptive_alpha: float = 15.0,
+        ll_artificial_viscosity_adaptive_dalpha: float = 3.0,
+        ll_loads_avl: bool = False,
         # Moving root reference frame
         moving: bool = False,
         rotation_dir: NDArray[np.float64] | None = None,
@@ -1536,6 +2385,19 @@ class Options(SolverOptions):
         self.multipole_degree = multipole_degree
         self.max_iter = max_iter
         self.tol = tol
+        self.ll_solver = ll_solver
+        self.ll_reynolds_corrections = ll_reynolds_corrections
+        self.ll_reynolds_corrections_nfact = ll_reynolds_corrections_nfact
+        self.ll_damp = ll_damp
+        self.ll_stall_regularisation = ll_stall_regularisation
+        self.ll_stall_regularisation_nelems = ll_stall_regularisation_nelems
+        self.ll_stall_regularizations_niters = ll_stall_regularizations_niters
+        self.ll_stall_regularization_alpha_stall = ll_stall_regularization_alpha_stall
+        self.ll_artificial_viscosity = ll_artificial_viscosity
+        self.ll_artificial_viscosity_adaptive = ll_artificial_viscosity_adaptive
+        self.ll_artificial_viscosity_adaptive_alpha = ll_artificial_viscosity_adaptive_alpha
+        self.ll_artificial_viscosity_adaptive_dalpha = ll_artificial_viscosity_adaptive_dalpha
+        self.ll_loads_avl = ll_loads_avl
 
         self.particles_box_min = (
             particles_box_min if particles_box_min is not None else np.zeros(3)
@@ -1597,7 +2459,7 @@ class Options(SolverOptions):
 
         def ceil_th(x: float, th: float) -> int:
             ix = int(x)
-            return ix if (x % ix < th) else ix + 1
+            return ix if ix > 0 and (x - ix) < th else ix + 1
 
         dx0, dx1, dx2 = dbox_sorted
         box_length = dx0 / n[0]
@@ -1643,6 +2505,8 @@ class OutputOptions:
         spanwise_axis_node: NDArray[np.float64] | None = None,
         spanwise_axis_dir: NDArray[np.float64] | None = None,
         spanwise_size: int = SPANLOAD_DEFAULT_NUM_STATIONS,
+        spanwise_lifting_line_data: bool = False,
+        spanwise_vortex_lattice_data: bool = False,
         viz_start: int = 0,
         viz_step: int = 1,
         viz_end: int = 0,
@@ -1674,6 +2538,8 @@ class OutputOptions:
         self.spanwise_axis_node = axis_node
         self.spanwise_axis_dir = axis_dir
         self.spanwise_size = spanwise_size
+        self.spanwise_lifting_line_data = spanwise_lifting_line_data
+        self.spanwise_vortex_lattice_data = spanwise_vortex_lattice_data
         self.viz_start = viz_start
         self.viz_step = viz_step
         self.viz_end = viz_end
@@ -1921,6 +2787,7 @@ class WingOptions(assembly.ComponentOptions):
         proj_te: bool | None = None,
         proj_te_dir: str | None = None,
         proj_te_vector: Sequence[float] | None = None,
+        mesh_flat: bool | None = None,
         output_options: OutputOptions | None = None,
     ) -> None:
         self.method = discretization_method
@@ -1936,6 +2803,7 @@ class WingOptions(assembly.ComponentOptions):
         self.proj_te_vector = (
             None if proj_te_vector is None else np.asarray(proj_te_vector, dtype=float)
         )
+        self.mesh_flat = mesh_flat
         self.output_opts = output_options or OutputOptions()
         self._check_args()
 
@@ -1975,6 +2843,7 @@ class Wing:
         proj_te: bool | None = None,
         proj_te_dir: str | None = None,
         proj_te_vector: Sequence[float] | None = None,
+        mesh_flat: bool | None = None,
         symmetry: bool = False,
         mirror: bool = False,
         options: OutputOptions | None = None,
@@ -2001,6 +2870,7 @@ class Wing:
         self.proj_te_vector = (
             None if proj_te_vector is None else np.asarray(proj_te_vector, dtype=float)
         )
+        self.mesh_flat = mesh_flat
         self.symmetry = symmetry
         self.mirror = mirror
         self.options = options or OutputOptions()
@@ -2039,6 +2909,7 @@ class Wing:
                 proj_te=opts.proj_te,
                 proj_te_dir=opts.proj_te_dir,
                 proj_te_vector=opts.proj_te_vector,
+                mesh_flat=opts.mesh_flat,
                 symmetry=comp.symmetry,
                 mirror=comp.mirror,
                 options=opts.output_opts,
@@ -2064,6 +2935,7 @@ class Wing:
             self.proj_te = opts.proj_te
             self.proj_te_dir = opts.proj_te_dir
             self.proj_te_vector = opts.proj_te_vector
+            self.mesh_flat = opts.mesh_flat
 
         self.pos = comp.global_pos
         self.offset = comp.offset
@@ -2142,6 +3014,8 @@ class Wing:
                 "starting_point = (/ {:.6f}, {:.6f}, {:.6f} /)\n".format(*start),
                 "# reference_chord_fraction is null with lifting lines\n",
             ]
+            if self.mesh_flat is not None:
+                out += [f"mesh_flat = {'T' if self.mesh_flat else 'F'}\n"]
         else:
             if self.panel_type is None:
                 msg = (
@@ -2511,6 +3385,8 @@ class PostSpanwiseLoads(Post):
         axis_nod: NDArray[np.float64] | None = None,
         axis_dir: NDArray[np.float64] | None = None,
         symmetric_geo: bool = False,
+        lifting_line_data: bool = False,
+        vortex_lattice_data: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(**kwargs)
@@ -2519,6 +3395,8 @@ class PostSpanwiseLoads(Post):
         self.axis_nod = np.zeros(3) if axis_nod is None else axis_nod
         self.axis_dir = np.array([0.0, 1.0, 0.0]) if axis_dir is None else axis_dir
         self.symmetric_geo = symmetric_geo
+        self.lifting_line_data = bool(lifting_line_data)
+        self.vortex_lattice_data = bool(vortex_lattice_data)
 
         self.y_cen: NDArray[np.float64]
         self.y_span: NDArray[np.float64]
@@ -2543,8 +3421,8 @@ class PostSpanwiseLoads(Post):
             f"    component = {self.components[0]}\n",
             "    axis_nod = " + fvec_temp.format(*self.axis_nod),
             "    axis_dir = " + fvec_temp.format(*self.axis_dir),
-            "    lifting_line_data = F\n",
-            "    vortex_lattice_data = F\n",
+            f"    lifting_line_data = {'T' if self.lifting_line_data else 'F'}\n",
+            f"    vortex_lattice_data = {'T' if self.vortex_lattice_data else 'F'}\n",
             "}\n",
         ]
 
@@ -3052,6 +3930,27 @@ class Driver:
                     "\n",
                     f"ll_max_iter = {self.options.max_iter}\n",
                     f"ll_tol = {self.options.tol:.6e}\n",
+                    f"ll_solver = {self.options.ll_solver}\n",
+                    "ll_reynolds_corrections = {}\n".format(
+                        "T" if self.options.ll_reynolds_corrections else "F",
+                    ),
+                    f"ll_reynolds_corrections_nfact = {self.options.ll_reynolds_corrections_nfact:.6g}\n",
+                    f"ll_damp = {self.options.ll_damp:.6g}\n",
+                    "ll_stall_regularisation = {}\n".format(
+                        "T" if self.options.ll_stall_regularisation else "F",
+                    ),
+                    f"ll_stall_regularisation_nelems = {self.options.ll_stall_regularisation_nelems}\n",
+                    f"ll_stall_regularizations_niters = {self.options.ll_stall_regularizations_niters}\n",
+                    f"ll_stall_regularization_alpha_stall = {self.options.ll_stall_regularization_alpha_stall:.6g}\n",
+                    f"ll_artificial_viscosity = {self.options.ll_artificial_viscosity:.6g}\n",
+                    "ll_artificial_viscosity_adaptive = {}\n".format(
+                        "T" if self.options.ll_artificial_viscosity_adaptive else "F",
+                    ),
+                    f"ll_artificial_viscosity_adaptive_alpha = {self.options.ll_artificial_viscosity_adaptive_alpha:.6g}\n",
+                    f"ll_artificial_viscosity_adaptive_dalpha = {self.options.ll_artificial_viscosity_adaptive_dalpha:.6g}\n",
+                    "ll_loads_avl = {}\n".format(
+                        "T" if self.options.ll_loads_avl else "F",
+                    ),
                     f"vl_maxiter = {self.options.max_iter}\n",
                     f"vl_tol = {self.options.tol:.6e}\n",
                 ],

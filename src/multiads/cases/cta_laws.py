@@ -10,10 +10,13 @@ DUST, launchers, wake models, panels or post-processing.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 from multiads.solvers.synthesis.geometry_lib import (
     ResolvedStation,
@@ -348,6 +351,28 @@ def build_cta_span_station_array(
     return span_stations.astype(float)
 
 
+def _check_profile_intersection(
+    upper_z_over_c: np.ndarray,
+    lower_z_over_c: np.ndarray,
+    y_value: float,
+    name: str,
+) -> None:
+    """Warn if the upper and lower CST surfaces cross at any chordwise point."""
+    thickness = upper_z_over_c - lower_z_over_c
+    n_violations = int(np.sum(thickness < 0.0))
+    if n_violations > 0:
+        min_thickness = float(np.min(thickness))
+        _log.warning(
+            "CST profile self-intersection at station '%s' (y=%.4f m): "
+            "%d chordwise point(s) have upper < lower (min gap = %.6f c). "
+            "This sample may produce invalid DUST results.",
+            name,
+            y_value,
+            n_violations,
+            min_thickness,
+        )
+
+
 def build_cta_resolved_station_factory(
     *,
     component: Wing,
@@ -393,6 +418,9 @@ def build_cta_resolved_station_factory(
                 lower_z_over_c=lower_z_over_c,
                 law_set=law_set,
             )
+            y_key = round(float(y_value), 10)
+            name = anchor_name_map.get(y_key, f"cta_station_{idx:03d}")
+            _check_profile_intersection(upper_z_over_c, lower_z_over_c, float(y_value), name)
             twist_deg = float(law_set.base_twist_fun(float(y_value)))
             leading_edge_x_m = float(law_set.leading_edge_x_fun(float(y_value)))
             leading_edge_z_m = float(law_set.base_leading_edge_z_fun(float(y_value)))
@@ -414,8 +442,6 @@ def build_cta_resolved_station_factory(
                 leading_edge_x_m,
                 leading_edge_z_m,
             )
-            y_key = round(float(y_value), 10)
-            name = anchor_name_map.get(y_key, f"cta_station_{idx:03d}")
             stations.append(
                 ResolvedStation(
                     name=name,

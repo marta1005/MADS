@@ -20,7 +20,6 @@ from multiads.solvers.aerodynamics.dust_lib import (
     run_dust_vlm_case_from_prepared_geometry,
 )
 from multiads.solvers.aerodynamics.neuralfoil import Neuralfoil
-from multiads.utilities.campaign_export import write_xlsx_workbook
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -105,115 +104,6 @@ def _wing_options(
     )
 
 
-def _augment_with_profile_drag(
-    row: dict[str, Any],
-    *,
-    profiles: dict[str, float],
-    q_pa: float,
-    s_ref_m2: float,
-) -> dict[str, Any]:
-    outer_cd = float(profiles["neuralfoil_outer_profile_cd"])
-    outer_drag = float(profiles["neuralfoil_outer_profile_drag_n"])
-    transition_outer_cd = float(profiles["neuralfoil_transition_outer_profile_cd"])
-    transition_outer_drag = float(profiles["neuralfoil_transition_outer_profile_drag_n"])
-    lift = float(row["lift_n"])
-    outer_drag_total = float(row["drag_n"]) + outer_drag
-    transition_outer_drag_total = float(row["drag_n"]) + transition_outer_drag
-    row.update(profiles)
-    row["cd_total_vlm_plus_outer_profile"] = float(row["cd"]) + outer_cd
-    row["drag_total_vlm_plus_outer_profile_n"] = outer_drag_total
-    row["ld_total_vlm_plus_outer_profile"] = (
-        lift / outer_drag_total if abs(outer_drag_total) > 1.0e-14 else float("nan")
-    )
-    row["cd_total_vlm_plus_transition_outer_profile"] = (
-        float(row["cd"]) + transition_outer_cd
-    )
-    row["drag_total_vlm_plus_transition_outer_profile_n"] = transition_outer_drag_total
-    row["ld_total_vlm_plus_transition_outer_profile"] = (
-        lift / transition_outer_drag_total
-        if abs(transition_outer_drag_total) > 1.0e-14
-        else float("nan")
-    )
-    row["outer_profile_drag_qs_check_cd"] = outer_drag / (float(q_pa) * float(s_ref_m2))
-    row["transition_outer_profile_drag_qs_check_cd"] = transition_outer_drag / (
-        float(q_pa) * float(s_ref_m2)
-    )
-    return row
-
-
-def _augment_history_with_profile_drag(
-    history: list[dict[str, float]],
-    *,
-    profiles: dict[str, float],
-) -> list[dict[str, float]]:
-    outer_cd = float(profiles["neuralfoil_outer_profile_cd"])
-    outer_drag = float(profiles["neuralfoil_outer_profile_drag_n"])
-    transition_outer_cd = float(profiles["neuralfoil_transition_outer_profile_cd"])
-    transition_outer_drag = float(profiles["neuralfoil_transition_outer_profile_drag_n"])
-    out: list[dict[str, float]] = []
-    for row in history:
-        enriched = dict(row)
-        enriched["neuralfoil_outer_profile_cd"] = outer_cd
-        enriched["neuralfoil_outer_profile_drag_n"] = outer_drag
-        enriched["neuralfoil_transition_outer_profile_cd"] = transition_outer_cd
-        enriched["neuralfoil_transition_outer_profile_drag_n"] = transition_outer_drag
-        enriched["cd_total_vlm_plus_outer_profile"] = float(row["cd"]) + outer_cd
-        enriched["drag_total_vlm_plus_outer_profile_n"] = float(row["drag_n"]) + outer_drag
-        enriched["ld_total_vlm_plus_outer_profile"] = (
-            float(row["lift_n"]) / enriched["drag_total_vlm_plus_outer_profile_n"]
-            if abs(enriched["drag_total_vlm_plus_outer_profile_n"]) > 1.0e-14
-            else float("nan")
-        )
-        enriched["cd_total_vlm_plus_transition_outer_profile"] = (
-            float(row["cd"]) + transition_outer_cd
-        )
-        enriched["drag_total_vlm_plus_transition_outer_profile_n"] = (
-            float(row["drag_n"]) + transition_outer_drag
-        )
-        enriched["ld_total_vlm_plus_transition_outer_profile"] = (
-            float(row["lift_n"])
-            / enriched["drag_total_vlm_plus_transition_outer_profile_n"]
-            if abs(enriched["drag_total_vlm_plus_transition_outer_profile_n"]) > 1.0e-14
-            else float("nan")
-        )
-        out.append(enriched)
-    return out
-
-
-def _final_profile_window_stats(history: list[dict[str, float]], window: int) -> dict[str, float]:
-    if not history:
-        return {}
-    tail = history[-max(1, int(window)) :]
-    keys = [
-        "cd_total_vlm_plus_outer_profile",
-        "drag_total_vlm_plus_outer_profile_n",
-        "ld_total_vlm_plus_outer_profile",
-        "cd_total_vlm_plus_transition_outer_profile",
-        "drag_total_vlm_plus_transition_outer_profile_n",
-        "ld_total_vlm_plus_transition_outer_profile",
-    ]
-    out: dict[str, float] = {}
-    for key in keys:
-        values = np.asarray([row[key] for row in tail], dtype=float)
-        out[f"history_final_window_{key}_mean"] = float(np.mean(values))
-        out[f"history_final_window_{key}_std"] = float(np.std(values))
-        out[f"history_final_window_{key}_min"] = float(np.min(values))
-        out[f"history_final_window_{key}_max"] = float(np.max(values))
-    return out
-
-
-def _write_workbook(output_dir: Path, result_rows: list[dict[str, Any]], design_row: dict[str, float]) -> None:
-    if not result_rows:
-        return
-    result_keys = list(result_rows[0])
-    workbook = output_dir / "cta_dust_vlm_convergence_results.xlsx"
-    write_xlsx_workbook(
-        workbook,
-        {
-            "results": [result_keys, *[[row.get(key) for key in result_keys] for row in result_rows]],
-            "baseline_design": [["name", "value"], *[[key, value] for key, value in design_row.items()]],
-        },
-    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -403,13 +293,15 @@ def main() -> None:
                     q_pa=result.q_pa,
                     s_ref_m2=s_ref_m2,
                     c_ref_m=c_ref_m,
+                    environment=env,
                 )
                 if args.save_force_history
                 else []
             )
-            history = _augment_history_with_profile_drag(
+            history = cta_common.augment_history_with_profile_drag(
                 history,
                 profiles=profile_metrics,
+                solver_label="vlm",
             )
             row: dict[str, Any] = {
                 "case_index": index,
@@ -433,11 +325,12 @@ def main() -> None:
                 **box_metrics,
                 **result.to_flat_dict(),
                 **cta_common.final_window_stats(history, int(args.loads_average_window)),
-                **_final_profile_window_stats(history, int(args.loads_average_window)),
+                **cta_common.final_profile_drag_window_stats(history, solver_label="vlm", window=int(args.loads_average_window)),
             }
-            row = _augment_with_profile_drag(
+            row = cta_common.augment_row_with_profile_drag(
                 row,
                 profiles=profile_metrics,
+                solver_label="vlm",
                 q_pa=result.q_pa,
                 s_ref_m2=s_ref_m2,
             )
@@ -482,7 +375,7 @@ def main() -> None:
         result_rows.append(row)
         cta_common.write_rows_csv(results_csv, result_rows)
 
-    _write_workbook(output_dir, result_rows, design_row)
+    cta_common.write_workbook(output_dir, "cta_dust_vlm_convergence_results.xlsx", result_rows, design_row)
     print("CTA VLM convergence completed")
     print(f"  results = {results_csv}")
     if args.save_force_history:

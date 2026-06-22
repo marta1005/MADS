@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import csv
 import json
 import logging
@@ -13,7 +12,7 @@ import gemseo
 import numpy as np
 from scipy.stats import qmc
 
-from multiads.assembly import AirfoilCST, Section, Span, Wing
+from multiads.assembly import AirfoilCST, Section, Span, Wing, WingGeometrySpec
 from multiads.cases.cta_laws import (
     build_cta_resolved_station_factory,
     build_cta_span_station_array,
@@ -680,7 +679,7 @@ def _build_span(index: int, section_in: Section, section_out: Section) -> Span:
         dihed=degrees(atan2(float(section_out.leading_edge_z_m - section_in.leading_edge_z_m), dy)),
         start_y_m=SECTION_VARIABLES[CTA_SECTION_ORDER[index]][1],
         end_y_m=SECTION_VARIABLES[CTA_SECTION_ORDER[index + 1]][1],
-        metadata={"leading_edge_mode": "section_positions"},
+        leading_edge_mode="section_positions",
     )
 
 
@@ -689,39 +688,6 @@ spans = [
     for index in range(len(sections) - 1)
 ]
 
-CTA_INTERPOLATION = {
-    "spanwise_law": "pchip",
-    "section_law": "pchip",
-    "field_laws": {
-        "chord": "pchip",
-        "twist": "pchip",
-        "leading_edge_x": "pchip",
-        "leading_edge_z": "pchip",
-        "airfoil": "pchip",
-    },
-    "field_scopes": {
-        "chord": "global",
-        "twist": "global",
-        "leading_edge_x": "global",
-        "leading_edge_z": "global",
-        "airfoil": "global",
-    },
-    "metadata": {
-        "resolved_station_factory": build_cta_resolved_station_factory,
-        "span_station_factory": build_cta_span_station_array,
-    },
-}
-
-CTA_SAMPLING = {
-    "station_distribution": "le_te",
-    "chordwise_points": CTA_NUM_AIRFOIL_POINTS,
-    "spanwise_stations": CTA_NUM_BASE_STATIONS,
-    # build_cta_span_station_array already injects and rounds the official
-    # anchor stations, matching the standalone BWB generator.
-    "include_anchor_stations": False,
-    "airfoil_distribution_mode": "all",
-}
-
 wing = Wing(
     name="cta_wing",
     sections=sections,
@@ -729,10 +695,32 @@ wing = Wing(
     case_name="CTA",
     symmetry=True,
     mirror=False,
-    metadata={
-        "interpolation": copy.deepcopy(CTA_INTERPOLATION),
-        "sampling": copy.deepcopy(CTA_SAMPLING),
-    },
+    geometry=WingGeometrySpec(
+        chordwise_points=CTA_NUM_AIRFOIL_POINTS,
+        spanwise_stations=CTA_NUM_BASE_STATIONS,
+        station_distribution="le_te",
+        # build_cta_span_station_array already injects and rounds the official
+        # anchor stations, matching the standalone BWB generator.
+        include_anchor_stations=False,
+        spanwise_law="pchip",
+        section_law="pchip",
+        field_laws={
+            "chord": "pchip",
+            "twist": "pchip",
+            "leading_edge_x": "pchip",
+            "leading_edge_z": "pchip",
+            "airfoil": "pchip",
+        },
+        field_scopes={
+            "chord": "global",
+            "twist": "global",
+            "leading_edge_x": "global",
+            "leading_edge_z": "global",
+            "airfoil": "global",
+        },
+        resolved_station_factory=build_cta_resolved_station_factory,
+        span_station_factory=build_cta_span_station_array,
+    ),
 )
 wing.cta_thickness_s4 = thickness_s4
 wing.cta_thickness_s5 = thickness_s5
@@ -1232,20 +1220,16 @@ def main() -> None:
     mesh = build_resolved_surface_mesh(resolved_wing.geometry_state)
     write_resolved_surface_mesh_npz(mesh_path, mesh)
 
-    resolved_wing.metadata = copy.deepcopy(resolved_wing.metadata)
-    sampling = dict(resolved_wing.metadata.get("sampling", {}))
-    sampling["airfoil_distribution_mode"] = "all"
-    resolved_wing.metadata["sampling"] = sampling
-    resolved_wing.metadata["export"] = {
-        "out_dir": str(profiles_dir),
-        "iges_path": str(output_dir / "cta.igs"),
-        "export_all_resolved_stations": True,
-        "blunt_trailing_edge": True,
-        "symmetric": False,
-        "tip_style": "rounded",
-        "section_curve_n_ctl": CTA_SECTION_CURVE_N_CTL,
-        "k_span": CTA_K_SPAN,
-    }
+    if resolved_wing.geometry is None:
+        resolved_wing.geometry = WingGeometrySpec()
+    resolved_wing.geometry.out_dir = str(profiles_dir)
+    resolved_wing.geometry.iges_path = str(output_dir / "cta.igs")
+    resolved_wing.geometry.export_all_resolved_stations = True
+    resolved_wing.geometry.blunt_trailing_edge = True
+    resolved_wing.geometry.symmetric = False
+    resolved_wing.geometry.tip_style = "rounded"
+    resolved_wing.geometry.section_curve_n_ctl = CTA_SECTION_CURVE_N_CTL
+    resolved_wing.geometry.k_span = CTA_K_SPAN
 
     disc_export = Geometry(
         name="GeometryExport",

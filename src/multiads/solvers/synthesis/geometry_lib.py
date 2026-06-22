@@ -4,19 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import PchipInterpolator, make_interp_spline
 
-from multiads.assembly import AirfoilCST, Section, Span, Wing, flatten_components
+from multiads.assembly import AirfoilCST, Section, Span, Wing, WingGeometrySpec, flatten_components
 from multiads.solvers import SolverOptions
-from multiads.utilities.pygeo_export import export_prepared_geometry_to_pygeo
 from multiads.utilities.pyspline_loader import load_pyspline_curve
-
-
-SpanwiseLawFactory = Callable[..., Any]
 
 
 @dataclass(slots=True)
@@ -36,11 +32,8 @@ class InterpolationConfig:
 
     spanwise_law: str = "pchip"
     section_law: str = "pchip"
-    blend_curve: str = "linear"
     field_laws: dict[str, str] = field(default_factory=dict)
     field_scopes: dict[str, str] = field(default_factory=dict)
-    spanwise_law_factory: SpanwiseLawFactory | None = None
-    section_law_factory: SpanwiseLawFactory | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -51,7 +44,6 @@ class ExportConfig:
     pygeo_mode: str = "stations"
     export_all_resolved_stations: bool = False
     blunt_trailing_edge: bool = True
-    trailing_edge_height_m: float = 0.0
     out_dir: str | None = None
     iges_path: str | None = None
     meshing_iges_path: str | None = None
@@ -87,7 +79,6 @@ class WingGeometryConfig:
     interpolation: InterpolationConfig = field(default_factory=InterpolationConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     constraints: ConstraintEvaluationConfig = field(default_factory=ConstraintEvaluationConfig)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _as_float_array_1d(values: NDArray[np.float64] | list[float] | tuple[float, ...]) -> NDArray[np.float64]:
@@ -172,7 +163,6 @@ class PreparedGeometry:
     anchor_stations: tuple[ResolvedStation, ...]
     resolved_stations: tuple[ResolvedStation, ...]
     envelope: GeometryEnvelope | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     def station_at_y(self, spanwise_y_m: float, atol: float = 1.0e-9) -> ResolvedStation:
         """Return the station exactly matching the requested spanwise location."""
@@ -972,87 +962,45 @@ class PyGeoExportOptions(SolverOptions):
 def build_geometry_config(component: Wing) -> WingGeometryConfig:
     """Build the global geometry configuration of a geometry-driven ``Wing``."""
 
-    config = WingGeometryConfig(
-        case_name=component.case_name,
-        component_name=component.name,
-        symmetry=bool(component.symmetry),
-        mirror=bool(component.mirror),
-    )
-    sampling_data = component.metadata.get("sampling", {})
-    if isinstance(sampling_data, dict):
-        if "chordwise_points" in sampling_data:
-            config.sampling.chordwise_points = int(sampling_data["chordwise_points"])
-        if "spanwise_stations" in sampling_data:
-            config.sampling.spanwise_stations = int(sampling_data["spanwise_stations"])
-        if "include_anchor_stations" in sampling_data:
-            config.sampling.include_anchor_stations = bool(sampling_data["include_anchor_stations"])
-        if "station_distribution" in sampling_data:
-            config.sampling.station_distribution = str(sampling_data["station_distribution"])
-        if "airfoil_distribution_mode" in sampling_data:
-            config.sampling.airfoil_distribution_mode = str(sampling_data["airfoil_distribution_mode"])
-    interpolation_data = component.metadata.get("interpolation", {})
-    if isinstance(interpolation_data, dict):
-        if "spanwise_law" in interpolation_data:
-            config.interpolation.spanwise_law = str(interpolation_data["spanwise_law"])
-        if "section_law" in interpolation_data:
-            config.interpolation.section_law = str(interpolation_data["section_law"])
-        if "blend_curve" in interpolation_data:
-            config.interpolation.blend_curve = str(interpolation_data["blend_curve"])
-        config.interpolation.field_laws.update(
-            {
-                str(key): str(value)
-                for key, value in dict(interpolation_data.get("field_laws", {})).items()
-            }
+    spec: WingGeometrySpec | None = getattr(component, "geometry", None)
+    if isinstance(spec, WingGeometrySpec):
+        # New clean path: read from typed WingGeometrySpec
+        config = WingGeometryConfig(
+            case_name=component.case_name,
+            component_name=component.name,
+            symmetry=bool(component.symmetry),
+            mirror=bool(component.mirror),
         )
-        config.interpolation.field_scopes.update(
-            {
-                str(key): str(value)
-                for key, value in dict(interpolation_data.get("field_scopes", {})).items()
-            }
-        )
-        config.interpolation.metadata.update(
-            {
-                str(key): value
-                for key, value in dict(interpolation_data.get("metadata", {})).items()
-            }
-        )
-    export_data = component.metadata.get("export", {})
-    if isinstance(export_data, dict):
-        if "pygeo_mode" in export_data:
-            config.export.pygeo_mode = str(export_data["pygeo_mode"])
-        if "export_all_resolved_stations" in export_data:
-            config.export.export_all_resolved_stations = bool(export_data["export_all_resolved_stations"])
-        if "blunt_trailing_edge" in export_data:
-            config.export.blunt_trailing_edge = bool(export_data["blunt_trailing_edge"])
-        if "trailing_edge_height_m" in export_data:
-            config.export.trailing_edge_height_m = float(export_data["trailing_edge_height_m"])
-        if "out_dir" in export_data:
-            config.export.out_dir = str(export_data["out_dir"])
-        if "iges_path" in export_data:
-            config.export.iges_path = str(export_data["iges_path"])
-        if "meshing_iges_path" in export_data:
-            config.export.meshing_iges_path = str(export_data["meshing_iges_path"])
-        if "frame_only_iges_path" in export_data:
-            config.export.frame_only_iges_path = str(export_data["frame_only_iges_path"])
-        if "symmetric" in export_data:
-            config.export.symmetric = bool(export_data["symmetric"])
-        if "tip_style" in export_data:
-            config.export.tip_style = str(export_data["tip_style"])
-        if "section_curve_n_ctl" in export_data:
-            config.export.section_curve_n_ctl = int(export_data["section_curve_n_ctl"])
-        if "k_span" in export_data:
-            config.export.k_span = int(export_data["k_span"])
-        if "include_xy_symmetry_frame" in export_data:
-            config.export.include_xy_symmetry_frame = bool(export_data["include_xy_symmetry_frame"])
-        if "write_frame_only" in export_data:
-            config.export.write_frame_only = bool(export_data["write_frame_only"])
-        config.export.metadata.update(
-            {
-                str(key): value
-                for key, value in dict(export_data.get("metadata", {})).items()
-            }
-        )
-    return config
+        config.sampling.chordwise_points = spec.chordwise_points
+        config.sampling.spanwise_stations = spec.spanwise_stations
+        config.sampling.station_distribution = spec.station_distribution
+        config.sampling.include_anchor_stations = spec.include_anchor_stations
+        config.interpolation.spanwise_law = spec.spanwise_law
+        config.interpolation.section_law = spec.section_law
+        config.interpolation.field_laws.update(spec.field_laws)
+        config.interpolation.field_scopes.update(spec.field_scopes)
+        if spec.resolved_station_factory is not None:
+            config.interpolation.metadata["resolved_station_factory"] = spec.resolved_station_factory
+        if spec.span_station_factory is not None:
+            config.interpolation.metadata["span_station_factory"] = spec.span_station_factory
+        if spec.out_dir is not None:
+            config.export.out_dir = spec.out_dir
+        if spec.iges_path is not None:
+            config.export.iges_path = spec.iges_path
+        if spec.meshing_iges_path is not None:
+            config.export.meshing_iges_path = spec.meshing_iges_path
+        if spec.frame_only_iges_path is not None:
+            config.export.frame_only_iges_path = spec.frame_only_iges_path
+        config.export.export_all_resolved_stations = spec.export_all_resolved_stations
+        config.export.blunt_trailing_edge = spec.blunt_trailing_edge
+        config.export.symmetric = spec.symmetric
+        config.export.tip_style = spec.tip_style
+        config.export.section_curve_n_ctl = spec.section_curve_n_ctl
+        config.export.k_span = spec.k_span
+        return config
+
+    msg = f"Wing '{component.name}' has no WingGeometrySpec attached. Set wing.geometry = WingGeometrySpec(...)."
+    raise ValueError(msg)
 
 
 def resolve_geometry(
@@ -1179,8 +1127,17 @@ def resolve_component_geometry(
 def export_geometry_to_pygeo(
     geometry: PreparedGeometry,
 ) -> PyGeoExportResult:
-    """Export one resolved geometry state to pyGeo/IGES artifacts."""
+    """Export one resolved geometry state to pyGeo/IGES artifacts.
 
+    Raises RuntimeError if pyGeo/pyspline are not installed.
+    """
+    try:
+        from multiads.utilities.pygeo_export import export_prepared_geometry_to_pygeo
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyGeo export is unavailable: could not import pygeo_export. "
+            "Install pyGeo and pyspline to enable IGES export."
+        ) from exc
     return export_prepared_geometry_to_pygeo(geometry)
 
 
@@ -1530,7 +1487,7 @@ def _resolve_segment_leading_edge_path(
     the geometry case explicitly asks for it.
     """
 
-    mode = _leading_edge_mode(span, config)
+    mode = _leading_edge_mode(span)
     if mode == "span_angles":
         y0 = float(sec_in.spanwise_y_m)
         x0 = float(sec_in.leading_edge_x_m or 0.0)
@@ -1568,14 +1525,8 @@ def _resolve_segment_leading_edge_path(
     return leading_edge_x, leading_edge_z
 
 
-def _leading_edge_mode(
-    span: Span,
-    config: WingGeometryConfig,
-) -> str:
-    mode = span.metadata.get("leading_edge_mode")
-    if mode is None:
-        mode = config.interpolation.metadata.get("leading_edge_mode", "section_positions")
-    mode = str(mode).lower()
+def _leading_edge_mode(span: Span) -> str:
+    mode = span.leading_edge_mode.lower()
     if mode not in {"section_positions", "span_angles"}:
         msg = (
             f"Unsupported leading-edge mode '{mode}' for span '{span.name}'. "
@@ -1673,18 +1624,13 @@ def _field_law(
     *,
     default: str,
 ) -> str:
-    interpolation_data = span.metadata.get("interpolation", {})
-    if isinstance(interpolation_data, dict):
-        field_laws = interpolation_data.get("field_laws", {})
-        if isinstance(field_laws, dict):
-            if field_name in field_laws:
-                return str(field_laws[field_name]).lower()
-            prefix = _field_prefix(field_name)
-            if prefix in field_laws:
-                return str(field_laws[prefix]).lower()
+    prefix = _field_prefix(field_name)
+    if field_name in span.field_laws:
+        return str(span.field_laws[field_name]).lower()
+    if prefix in span.field_laws:
+        return str(span.field_laws[prefix]).lower()
     if field_name in config.interpolation.field_laws:
         return str(config.interpolation.field_laws[field_name]).lower()
-    prefix = _field_prefix(field_name)
     if prefix in config.interpolation.field_laws:
         return str(config.interpolation.field_laws[prefix]).lower()
     return str(default).lower()
@@ -1697,18 +1643,13 @@ def _field_scope(
     *,
     default: str,
 ) -> str:
-    interpolation_data = span.metadata.get("interpolation", {})
-    if isinstance(interpolation_data, dict):
-        field_scopes = interpolation_data.get("field_scopes", {})
-        if isinstance(field_scopes, dict):
-            if field_name in field_scopes:
-                return _normalize_field_scope(field_scopes[field_name], field_name, span.name)
-            prefix = _field_prefix(field_name)
-            if prefix in field_scopes:
-                return _normalize_field_scope(field_scopes[prefix], field_name, span.name)
+    prefix = _field_prefix(field_name)
+    if field_name in span.field_scopes:
+        return _normalize_field_scope(span.field_scopes[field_name], field_name, span.name)
+    if prefix in span.field_scopes:
+        return _normalize_field_scope(span.field_scopes[prefix], field_name, span.name)
     if field_name in config.interpolation.field_scopes:
         return _normalize_field_scope(config.interpolation.field_scopes[field_name], field_name, span.name)
-    prefix = _field_prefix(field_name)
     if prefix in config.interpolation.field_scopes:
         return _normalize_field_scope(config.interpolation.field_scopes[prefix], field_name, span.name)
     return _normalize_field_scope(default, field_name, span.name)
@@ -1830,7 +1771,7 @@ def _validate_geometry_wing(component: Wing) -> None:
                 f"spanwise_y_m in wing '{component.name}'."
             )
             raise ValueError(msg)
-        if _leading_edge_mode(span, config) == "span_angles":
+        if _leading_edge_mode(span) == "span_angles":
             expected_x_end, expected_z_end = _resolve_segment_leading_edge_path(
                 sections_sorted,
                 sec_in,

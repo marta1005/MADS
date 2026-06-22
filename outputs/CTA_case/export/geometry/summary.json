@@ -1,9 +1,9 @@
 {
   "artifacts": {
-    "iges": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/cta.igs",
-    "output_dir": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export",
-    "resolved_mesh_npz": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/cta_resolved_mesh.npz",
-    "station_airfoils": "/Users/martaarnabatmartin/Desktop/MADS/outputs/cta_geometry_export/station_airfoils"
+    "iges": "/Users/martaarnabatmartin/Desktop/MADS/outputs/CTA_case/export/geometry/cta.igs",
+    "output_dir": "/Users/martaarnabatmartin/Desktop/MADS/outputs/CTA_case/export/geometry",
+    "resolved_mesh_npz": "/Users/martaarnabatmartin/Desktop/MADS/outputs/CTA_case/export/geometry/cta_resolved_mesh.npz",
+    "station_airfoils": "/Users/martaarnabatmartin/Desktop/MADS/outputs/CTA_case/export/geometry/station_airfoils"
   },
   "case": "CTA official nine-section baseline",
   "design_space": {

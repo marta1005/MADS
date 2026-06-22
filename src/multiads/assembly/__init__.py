@@ -3,8 +3,9 @@ from __future__ import annotations
 import copy
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar
 
 import numpy as np
 import scipy.interpolate as sint
@@ -20,6 +21,41 @@ from multiads.utilities.cst import (
 T = TypeVar("T")
 
 Optimizable: TypeAlias = Variable[V, N] | T
+
+
+@dataclass
+class WingGeometrySpec:
+    """User-facing geometry specification attached to a Wing.
+
+    Set this on Wing.geometry instead of using Wing.metadata dicts.
+    """
+
+    # Sampling
+    chordwise_points: int = 201
+    spanwise_stations: int = 51
+    station_distribution: str = "le_te"
+    include_anchor_stations: bool = True
+
+    # Interpolation
+    spanwise_law: str = "pchip"
+    section_law: str = "pchip"
+    field_laws: dict[str, str] = field(default_factory=dict)
+    field_scopes: dict[str, str] = field(default_factory=dict)
+    resolved_station_factory: Any = None   # callable or None
+    span_station_factory: Any = None       # callable or None
+
+    # Export
+    out_dir: str | None = None
+    iges_path: str | None = None
+    meshing_iges_path: str | None = None
+    frame_only_iges_path: str | None = None
+    export_all_resolved_stations: bool = False
+    blunt_trailing_edge: bool = True
+    symmetric: bool = False
+    tip_style: str = "rounded"
+    section_curve_n_ctl: int = 18
+    k_span: int = 4
+
 
 OptimizableInt: TypeAlias = Optimizable[
     np.int32,
@@ -814,6 +850,9 @@ class Span(MADSComponent):
         start_y_m: OptimizableFloat | None = None,
         end_y_m: OptimizableFloat | None = None,
         metadata: Mapping[str, object] | None = None,
+        leading_edge_mode: str = "section_positions",
+        field_laws: dict[str, str] | None = None,
+        field_scopes: dict[str, str] | None = None,
     ) -> None:
         super().__init__(name, options)
         if start_y_m is not None and end_y_m is not None:
@@ -824,6 +863,9 @@ class Span(MADSComponent):
         self.start_y_m: float | None = start_y_m
         self.end_y_m: float | None = end_y_m
         self.metadata: dict[str, object] = {} if metadata is None else dict(metadata)
+        self.leading_edge_mode: str = leading_edge_mode
+        self.field_laws: dict[str, str] = {} if field_laws is None else dict(field_laws)
+        self.field_scopes: dict[str, str] = {} if field_scopes is None else dict(field_scopes)
 
     def __setattr__(self, name: str, val: object) -> None:
         super().__setattr__(name, val)
@@ -907,6 +949,7 @@ class Wing(MADSComponent):
         a_stringer_root: OptimizableFloat = 1.0e-3,
         y_wing_fuselage_interface: OptimizableFloat = 0.0,
         case_name: str | None = None,
+        geometry: WingGeometrySpec | None = None,
         symmetry: bool = False,
         mirror: bool = False,
         metadata: Mapping[str, object] | None = None,
@@ -926,7 +969,6 @@ class Wing(MADSComponent):
         self.mass: float = mass
         self.offset: NDArray[np.float64] = offset
         self.scaling: float = scaling
-        self.mass: float = mass
         self.global_pos: NDArray[np.float64] = global_pos
         self.alpha: float = alpha
         self.beta: float = beta
@@ -939,6 +981,7 @@ class Wing(MADSComponent):
         self.a_stringer_root: float = a_stringer_root
         self.y_wing_fuselage_interface: float = y_wing_fuselage_interface
         self.case_name = case_name
+        self.geometry: WingGeometrySpec | None = geometry
         self.symmetry = symmetry
         self.mirror = mirror
         self.metadata: dict[str, object] = {} if metadata is None else dict(metadata)

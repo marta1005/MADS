@@ -7,11 +7,14 @@ result is packed into ``ResolvedStation`` objects.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
+
+_log = logging.getLogger(__name__)
 
 from multiads.solvers.synthesis.geometry_lib import (
     build_control_point_planform,
@@ -304,6 +307,16 @@ def scale_thickness_preserving_trailing_edge(
     scale = 0.5 * (low + high)
     new_thickness = scale * shape_thickness + x_arr * te_thickness
     new_thickness = np.maximum(new_thickness, 0.0)
+    achieved_tc = float(np.max(new_thickness))
+    if abs(achieved_tc - target_tc) > 1.0e-4:
+        _log.warning(
+            "scale_thickness_preserving_trailing_edge did not converge: "
+            "target t/c = %.6f, achieved t/c = %.6f (error = %.2e). "
+            "The profile shape may be incorrect for this sample.",
+            target_tc,
+            achieved_tc,
+            abs(achieved_tc - target_tc),
+        )
     return camber + 0.5 * new_thickness, camber - 0.5 * new_thickness
 
 

@@ -21,7 +21,6 @@ from multiads.solvers.aerodynamics.dust_lib import (
     dust_executable,
     run_dust_case_from_resolved_npz,
 )
-from multiads.utilities.campaign_export import write_xlsx_workbook
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -125,20 +124,6 @@ def _write_manifest(args: argparse.Namespace, path: Path, cases: list[dict[str, 
             sort_keys=True,
         ),
         encoding="utf-8",
-    )
-
-
-def _write_workbook(output_dir: Path, result_rows: list[dict[str, Any]], design_row: dict[str, float]) -> None:
-    if not result_rows:
-        return
-    result_keys = list(result_rows[0])
-    workbook = output_dir / "cta_dust_panel_convergence_results.xlsx"
-    write_xlsx_workbook(
-        workbook,
-        {
-            "results": [result_keys, *[[row.get(key) for key in result_keys] for row in result_rows]],
-            "baseline_design": [["name", "value"], *[[key, value] for key, value in design_row.items()]],
-        },
     )
 
 
@@ -261,6 +246,7 @@ def main() -> None:
                     q_pa=result.q_pa,
                     s_ref_m2=s_ref_m2,
                     c_ref_m=c_ref_m,
+                    environment=env,
                 )
                 if args.save_force_history
                 else []
@@ -322,7 +308,7 @@ def main() -> None:
         result_rows.append(row)
         cta_common.write_rows_csv(results_csv, result_rows)
 
-    _write_workbook(output_dir, result_rows, design_row)
+    cta_common.write_workbook(output_dir, "cta_dust_panel_convergence_results.xlsx", result_rows, design_row)
     print("CTA panel convergence completed")
     print(f"  results = {results_csv}")
     if args.save_force_history:
