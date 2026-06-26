@@ -27,6 +27,7 @@ from multiads.solvers.aerodynamics.dust_lib import (
     compute_reconstructed_drag_coefficients,
     dust_executable,
     lifting_line_solver_preset,
+    run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry,
     run_dust_lifting_line_case_from_prepared_geometry,
     validate_lifting_line_case,
 )
@@ -148,6 +149,7 @@ def _profile_metrics(
     s_ref_m2: float,
 ) -> dict[str, float]:
     if args.profile_drag == "neuralfoil":
+        mach_polar_val = float(args.polar_mach) if float(args.polar_mach) > 0.0 else None
         metrics: dict[str, float] = {}
         metrics.update(
             Neuralfoil.estimate_profile_drag_from_resolved_stations(
@@ -160,6 +162,8 @@ def _profile_metrics(
                 station_stride=int(args.profile_station_stride),
                 y_min_m=0.0,
                 metric_prefix="neuralfoil_full",
+                mach_polar=mach_polar_val,
+                cd_min_friction=float(args.polar_cd_min),
             ),
         )
         metrics.update(
@@ -173,6 +177,8 @@ def _profile_metrics(
                 station_stride=int(args.profile_station_stride),
                 y_min_m=float(args.outer_start_y_m),
                 metric_prefix="neuralfoil_outer",
+                mach_polar=mach_polar_val,
+                cd_min_friction=float(args.polar_cd_min),
             ),
         )
         metrics.update(
@@ -186,6 +192,8 @@ def _profile_metrics(
                 station_stride=int(args.profile_station_stride),
                 y_min_m=float(args.transition_start_y_m),
                 metric_prefix="neuralfoil_transition_outer",
+                mach_polar=mach_polar_val,
+                cd_min_friction=float(args.polar_cd_min),
             ),
         )
         return metrics
@@ -248,6 +256,26 @@ def _add_reconstructed_drag(
             e_eff=float(e_eff),
         ),
     )
+    return row
+
+
+def _add_full_aircraft_ld(row: dict[str, Any], *, e_eff: float) -> dict[str, Any]:
+    """Add full-aircraft L/D using neuralfoil_full_profile_cd and actual aircraft AR."""
+    import math
+    span_m = float(row.get(f"{COMPONENT_NAME}.span_m", float("nan")))
+    s_ref_m2 = float(row.get(f"{COMPONENT_NAME}.planform_area_m2", float("nan")))
+    if not (math.isfinite(span_m) and math.isfinite(s_ref_m2) and s_ref_m2 > 0):
+        return row
+    ar_full = span_m**2 / s_ref_m2
+    cl = float(row.get("cl_wind", row.get("cl", 0.0)))
+    cd_profile_full = float(row.get("neuralfoil_full_profile_cd", 0.0))
+    cd_induced_full = cl**2 / (math.pi * ar_full * max(float(e_eff), 1.0e-12))
+    cd_total_full = cd_profile_full + cd_induced_full
+    row["ar_full_aircraft"] = ar_full
+    row["cd_profile_full_aircraft"] = cd_profile_full
+    row["cd_induced_full_aircraft"] = cd_induced_full
+    row["cd_total_full_aircraft"] = cd_total_full
+    row["ld_full_aircraft"] = cl / cd_total_full if cd_total_full > 1.0e-14 else float("nan")
     return row
 
 
@@ -543,20 +571,23 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run CTA baseline DUST lifting-line diagnostic cases.",
     )
-    parser.add_argument("--steps", default="70")
-    parser.add_argument("--meshes", default="21x1,41x1")
+    parser.add_argument("--steps", default="200")
+    parser.add_argument("--meshes", default="3x1")
     parser.add_argument(
         "--geometry-modes",
         default="transition_outer",
         help=(
-            "Comma-separated LL geometry variants: outer_only, transition_outer, "
-            "full_bwb_equivalent, full_bwb_anchor_equivalent, calibrated_outer, "
-            "equivalent, resolved, rectangular."
+            "Comma-separated LL geometry variants. "
+            "'transition_outer' (default) models the outer wing from y=12.5m "
+            "to tip — the only region where LL is valid for this BWB (centerbody "
+            "chord>>span violates the LL assumption). "
+            "Other options: outer_only, full_bwb_anchor_equivalent, resolved, rectangular, "
+            "centerbody_vlm_ll (hybrid: VLM panels for centerbody + LL for outer wing)."
         ),
     )
-    parser.add_argument("--mesh-flat-options", default="T,F")
-    parser.add_argument("--ll-presets", default="conservative,nominal")
-    parser.add_argument("--span-types", default="uniform,cosine")
+    parser.add_argument("--mesh-flat-options", default="T")
+    parser.add_argument("--ll-presets", default="conservative")
+    parser.add_argument("--span-types", default="cosine")
     parser.add_argument(
         "--alphas",
         default=None,
@@ -583,7 +614,7 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--lifting-line-effective-start-y-m", type=float, default=12.5)
-    parser.add_argument("--lifting-line-root-chord-scale", type=float, default=1.0)
+    parser.add_argument("--lifting-line-root-chord-scale", type=float, default=0.001)
     parser.add_argument("--lifting-line-root-twist-deg", type=float, default=None)
     parser.add_argument("--no-lifting-line-root-blend", action="store_true")
     parser.add_argument("--lifting-line-anchor-min-spacing-m", type=float, default=1.5)
@@ -616,7 +647,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--transition-start-y-m", type=float, default=12.5)
     parser.add_argument("--ll-damps", default=None)
     parser.add_argument("--ll-loads-avl-options", default=None)
-    parser.add_argument("--reconstructed-drag-e-eff", type=float, default=0.75)
+    parser.add_argument("--reconstructed-drag-e-eff", type=float, default=0.85)
     parser.add_argument(
         "--diagnostic-suite",
         action="store_true",
@@ -687,11 +718,9 @@ def main() -> None:
     meshes = cta_common.parse_mesh_list(args.meshes)
     if args.diagnostic_suite:
         geometry_modes = [
-            "full_bwb_anchor_equivalent",
-            "full_bwb_equivalent",
-            "outer_only",
-            "transition_outer",
-            "rectangular",
+            "transition_outer",  # primary: outer wing from y=12.5m, LL valid here
+            "outer_only",        # conservative: outer wing only from y=22.5m
+            "rectangular",       # NACA0012 sanity check
         ]
         mesh_flat_options = [True]
         ll_presets = ["conservative"]
@@ -801,6 +830,7 @@ def main() -> None:
             c_ref_m = rectangular_geometry_metrics[
                 f"{COMPONENT_NAME}.mean_aerodynamic_chord_m"
             ]
+            _mach_polar_rect = float(args.polar_mach) if float(args.polar_mach) > 0.0 else None
             profile_metrics = {
                 **Neuralfoil.estimate_profile_drag_from_resolved_stations(
                     rectangular_geometry_state.resolved_stations,
@@ -811,6 +841,8 @@ def main() -> None:
                     model=args.neuralfoil_model,
                     n_crit=float(args.neuralfoil_n_crit),
                     metric_prefix="neuralfoil_outer",
+                    mach_polar=_mach_polar_rect,
+                    cd_min_friction=float(args.polar_cd_min),
                 ),
                 **Neuralfoil.estimate_profile_drag_from_resolved_stations(
                     rectangular_geometry_state.resolved_stations,
@@ -821,6 +853,8 @@ def main() -> None:
                     model=args.neuralfoil_model,
                     n_crit=float(args.neuralfoil_n_crit),
                     metric_prefix="neuralfoil_transition_outer",
+                    mach_polar=_mach_polar_rect,
+                    cd_min_friction=float(args.polar_cd_min),
                 ),
             }
         else:
@@ -879,28 +913,49 @@ def main() -> None:
 
         start = time.perf_counter()
         polar_diagnostics: dict[str, float] = {}
+        polar_provider = build_neuralfoil_polar_provider(
+            source=polar_source,
+            model=args.neuralfoil_model,
+            n_crit=float(args.neuralfoil_n_crit),
+            sanitize=bool(args.sanitize_polars),
+            cd_min=float(args.polar_cd_min),
+            mach_polar=float(args.polar_mach) if float(args.polar_mach) > 0.0 else None,
+            diagnostics=polar_diagnostics,
+        )
         try:
-            result = run_dust_lifting_line_case_from_prepared_geometry(
-                active_geometry_state,
-                environment=env,
-                options=options,
-                s_ref_m2=s_ref_m2,
-                c_ref_m=c_ref_m,
-                mesh_settings=mesh_settings,
-                wing_options=wing_options,
-                clean_run_dir=True,
-                component_name=COMPONENT_NAME,
-                polar_provider=build_neuralfoil_polar_provider(
-                    source=polar_source,
-                    model=args.neuralfoil_model,
-                    n_crit=float(args.neuralfoil_n_crit),
-                    sanitize=bool(args.sanitize_polars),
-                    cd_min=float(args.polar_cd_min),
-                    mach_polar=float(args.polar_mach) if float(args.polar_mach) > 0.0 else None,
-                    diagnostics=polar_diagnostics,
-                ),
-            )
+            if geometry_variant == "centerbody_vlm_ll":
+                result = run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry(
+                    active_geometry_state,
+                    environment=env,
+                    options=options,
+                    s_ref_m2=s_ref_m2,
+                    c_ref_m=c_ref_m,
+                    centerbody_end_y_m=float(args.transition_start_y_m),
+                    centerbody_n_span_stations=6,
+                    centerbody_n_chord_panels=6,
+                    wing_options=wing_options,
+                    clean_run_dir=True,
+                    polar_provider=polar_provider,
+                )
+            else:
+                result = run_dust_lifting_line_case_from_prepared_geometry(
+                    active_geometry_state,
+                    environment=env,
+                    options=options,
+                    s_ref_m2=s_ref_m2,
+                    c_ref_m=c_ref_m,
+                    mesh_settings=mesh_settings,
+                    wing_options=wing_options,
+                    clean_run_dir=True,
+                    component_name=COMPONENT_NAME,
+                    polar_provider=polar_provider,
+                )
             elapsed_s = time.perf_counter() - start
+            history_component = (
+                "cta_outer_wing"
+                if geometry_variant == "centerbody_vlm_ll"
+                else COMPONENT_NAME
+            )
             history = (
                 cta_common.read_force_history(
                     run_dir,
@@ -909,6 +964,7 @@ def main() -> None:
                     s_ref_m2=s_ref_m2,
                     c_ref_m=c_ref_m,
                     environment=env,
+                    component_name=history_component,
                 )
                 if args.save_force_history
                 else []
@@ -958,6 +1014,7 @@ def main() -> None:
                 geometry_variant=geometry_variant,
                 e_eff=float(args.reconstructed_drag_e_eff),
             )
+            _add_full_aircraft_ld(row, e_eff=float(args.reconstructed_drag_e_eff))
             row.update(validate_lifting_line_case(row))
             for step_index, history_row in enumerate(history, start=1):
                 flat_history = {

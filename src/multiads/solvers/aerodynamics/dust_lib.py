@@ -1920,6 +1920,203 @@ def run_dust_lifting_line_case_from_prepared_geometry(
     )
 
 
+def run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry(
+    geometry: PreparedGeometry,
+    *,
+    environment: assembly.Environment,
+    options: Options,
+    s_ref_m2: float,
+    c_ref_m: float,
+    centerbody_end_y_m: float = 12.5,
+    centerbody_n_span_stations: int = 6,
+    centerbody_n_chord_panels: int = 6,
+    outer_mesh_settings: DustMeshSettings | None = None,
+    wing_options: WingOptions | None = None,
+    clean_run_dir: bool = True,
+    centerbody_component_name: str = "cta_centerbody",
+    outer_component_name: str = "cta_outer_wing",
+    result_file_name: str = "dust_result.json",
+    polar_provider: Callable[
+        [assembly.Environment, assembly.Wing, Mapping[str, "PolarVariable"]],
+        None,
+    ]
+    | None = None,
+) -> DustCaseResult:
+    """Hybrid DUST run: VLM panels for centerbody + LL for outer wing.
+
+    The centerbody (low AR, LL not valid) is modeled with inviscid VLM panels.
+    The outer wing (high AR) is modeled with viscous LL using C81 polars.
+    Both components run in the same DUST simulation and interact through their
+    shared wake system, so the centerbody downwash on the outer wing is captured
+    correctly.  Forces from both components are summed to give the full-span CL.
+    """
+    from multiads.solvers.aerodynamics.dust import DUST
+
+    cb_mesh = DustMeshSettings(
+        n_span_stations=int(centerbody_n_span_stations),
+        n_chord_stations=int(centerbody_n_chord_panels) + 1,
+        span_max_y_m=float(centerbody_end_y_m),
+    )
+    if outer_mesh_settings is None:
+        outer_mesh_settings = DustMeshSettings(
+            n_span_stations=3,
+            n_chord_stations=1,
+            lifting_line_geometry_mode="transition_outer",
+            lifting_line_root_chord_scale=0.001,
+            lifting_line_blend_root_to_start=True,
+        )
+
+    case_options = copy.deepcopy(options)
+    if case_options.run_directory is None:
+        msg = "Options.run_directory must be set for hybrid DUST runs."
+        raise ValueError(msg)
+    run_path = Path(case_options.run_directory)
+    case_options.keep_run_directory = True
+    if clean_run_dir and run_path.exists():
+        shutil.rmtree(run_path)
+    (run_path / "geometry").mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.output_dir).mkdir(parents=True, exist_ok=True)
+    (run_path / case_options.post_dir).mkdir(parents=True, exist_ok=True)
+
+    env = copy.deepcopy(environment)
+    speed = float(env.speed)
+    n_steps = _n_steps_from_options(case_options)
+
+    cb_wing_options = _prepare_parametric_wing_options(
+        wing_options,
+        environment=env,
+        n_steps=n_steps,
+        n_chord_panels=int(centerbody_n_chord_panels),
+        method=WingMethod.VORTEX_LATTICE,
+    )
+    outer_wing_options = _prepare_parametric_wing_options(
+        wing_options,
+        environment=env,
+        n_steps=n_steps,
+        n_chord_panels=0,
+        method=WingMethod.LIFTING_LINE,
+    )
+
+    # Use only named anchor stations for the centerbody VLM.  The resolved geometry
+    # has hundreds of dense helper stations near y=0 with near-zero span and extreme
+    # sweep angles (~65°) that make VLM panels degenerate and produce NaN forces.
+    # Anchor stations (cta_s0, cta_s1, cta_s1a, cta_s2, cta_s3, cta_s4) have spans
+    # of 1.9–4.5 m and give stable VLM panels.
+    all_stations = sorted(
+        geometry.resolved_stations,
+        key=lambda s: float(s.spanwise_y_m),
+    )
+    cb_anchor_stations = [
+        s
+        for s in all_stations
+        if float(s.spanwise_y_m) <= float(centerbody_end_y_m) + 1.0e-6
+        and _is_named_anchor_station(s)
+    ]
+    if len(cb_anchor_stations) < 2:
+        msg = (
+            f"Centerbody VLM needs at least 2 anchor stations below y={centerbody_end_y_m} m; "
+            f"found {len(cb_anchor_stations)}."
+        )
+        raise ValueError(msg)
+    cb_anchor_geometry = SimpleNamespace(resolved_stations=cb_anchor_stations)
+    cb_anchor_mesh = DustMeshSettings(
+        n_span_stations=len(cb_anchor_stations),
+        n_chord_stations=int(centerbody_n_chord_panels) + 1,
+    )
+    wing_cb, _ = _build_parametric_wing_from_geometry(
+        cb_anchor_geometry,
+        run_path,
+        component_name=centerbody_component_name,
+        mesh_settings=cb_anchor_mesh,
+        wing_options=cb_wing_options,
+    )
+    wing_outer, outer_mesh_info = _build_parametric_wing_from_geometry(
+        geometry,
+        run_path,
+        component_name=outer_component_name,
+        mesh_settings=outer_mesh_settings,
+        wing_options=outer_wing_options,
+    )
+
+    if polar_provider is None:
+        msg = "Hybrid VLM+LL case requires a polar_provider for the LL outer wing."
+        raise RuntimeError(msg)
+
+    dust_solver = DUST(options=case_options)
+    components = dust_solver.parse_variables([env, wing_cb, wing_outer])
+    if dust_solver.polars is None:
+        msg = "DUST did not allocate polar inputs for the LL outer wing."
+        raise RuntimeError(msg)
+    polar_provider(env, wing_outer, dust_solver.polars)
+    _validate_lifting_line_polars(dust_solver.polars, env)
+
+    dust_solver.run(components)
+    dust_solver.compute_output()
+    _remove_duplicate_dust_output_dirs(run_path, case_options.output_dir)
+    if dust_solver.outputs_map is None:
+        msg = "DUST did not expose output variables."
+        raise RuntimeError(msg)
+
+    force_cb = np.asarray(
+        dust_solver.outputs_map[f"{centerbody_component_name}.force"].value,
+        dtype=float,
+    )
+    moment_cb = np.asarray(
+        dust_solver.outputs_map[f"{centerbody_component_name}.moment"].value,
+        dtype=float,
+    )
+    force_outer = np.asarray(
+        dust_solver.outputs_map[f"{outer_component_name}.force"].value,
+        dtype=float,
+    )
+    moment_outer = np.asarray(
+        dust_solver.outputs_map[f"{outer_component_name}.moment"].value,
+        dtype=float,
+    )
+
+    force_total = force_cb + force_outer
+    moment_total = moment_cb + moment_outer
+
+    if not np.all(np.isfinite(force_total)) or not np.all(np.isfinite(moment_total)):
+        msg = "Hybrid VLM+LL case returned non-finite loads."
+        raise RuntimeError(msg)
+
+    q_inf = 0.5 * float(env.density) * speed**2
+    loads_norm = normalize_reference_loads(
+        force_total,
+        moment_total,
+        q_inf,
+        float(s_ref_m2),
+        float(c_ref_m),
+        env,
+    )
+    result = DustCaseResult(
+        alpha_deg=float(env.alpha),
+        mach=float(env.mach),
+        altitude_ft=float(env.height / 0.3048),
+        disa_k=float(getattr(env, "disa_k", 0.0)),
+        speed_mps=float(speed),
+        rho_kg_m3=float(env.density),
+        q_pa=float(q_inf),
+        s_ref_m2=float(s_ref_m2),
+        c_ref_m=float(c_ref_m),
+        fx_reference_n=float(force_total[0]),
+        fy_reference_n=float(force_total[1]),
+        fz_reference_n=float(force_total[2]),
+        mx_reference_nm=float(moment_total[0]),
+        my_reference_nm=float(moment_total[1]),
+        mz_reference_nm=float(moment_total[2]),
+        run_dir=str(run_path),
+        mesh_info=outer_mesh_info,
+        **loads_norm,
+    )
+    (run_path / result_file_name).write_text(
+        json.dumps(result.to_flat_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return result
+
+
 def _run_dust_parametric_case_from_prepared_geometry(
     geometry: PreparedGeometry,
     *,
@@ -2113,6 +2310,9 @@ class ResolvedGeometryDustDiscipline(Discipline):
         fail_fast: bool = False,
         reuse_run_directory: bool = False,
         run_directory_name: str = "run",
+        neuralfoil_mach_polar: float | None = None,
+        neuralfoil_cd_min_friction: float = 0.006,
+        neuralfoil_model: str = "large",
     ) -> None:
         super().__init__(name)
         self.geometry_provider = geometry_provider
@@ -2131,6 +2331,9 @@ class ResolvedGeometryDustDiscipline(Discipline):
         self.fail_fast = bool(fail_fast)
         self.reuse_run_directory = bool(reuse_run_directory)
         self.run_directory_name = str(run_directory_name)
+        self.neuralfoil_mach_polar = float(neuralfoil_mach_polar) if neuralfoil_mach_polar is not None else None
+        self.neuralfoil_cd_min_friction = float(neuralfoil_cd_min_friction)
+        self.neuralfoil_model = str(neuralfoil_model)
         self.case_index = 0
 
         self.input_grammar.update_from_data(
@@ -2144,6 +2347,9 @@ class ResolvedGeometryDustDiscipline(Discipline):
             InnerVariableFloat(f"{self.output_prefix}_cm", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_cy", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_ld", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cl_wind", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_cd_wind", 0.0),
+            InnerVariableFloat(f"{self.output_prefix}_ld_wind", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_lift_n", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_drag_n", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_side_n", 0.0),
@@ -2154,6 +2360,13 @@ class ResolvedGeometryDustDiscipline(Discipline):
             InnerVariableFloat(f"{self.output_prefix}_my_reference_nm", 0.0),
             InnerVariableFloat(f"{self.output_prefix}_mz_reference_nm", 0.0),
         ]
+        if self.neuralfoil_mach_polar is not None:
+            self.output_variables.extend([
+                InnerVariableFloat(f"{self.output_prefix}_neuralfoil_full_profile_cd", 0.0),
+                InnerVariableFloat(f"{self.output_prefix}_cd_induced_full_aircraft", 0.0),
+                InnerVariableFloat(f"{self.output_prefix}_cd_total_full_aircraft", 0.0),
+                InnerVariableFloat(f"{self.output_prefix}_ld_full_aircraft", 0.0),
+            ])
         self.output_grammar.update_from_data(
             {var.name: var.value_np for var in self.output_variables},
         )
@@ -2238,6 +2451,9 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 f"{self.output_prefix}_cm": result.cm,
                 f"{self.output_prefix}_cy": result.cy,
                 f"{self.output_prefix}_ld": result.ld,
+                f"{self.output_prefix}_cl_wind": result.cl_wind,
+                f"{self.output_prefix}_cd_wind": result.cd_wind,
+                f"{self.output_prefix}_ld_wind": result.ld_wind,
                 f"{self.output_prefix}_lift_n": result.lift_n,
                 f"{self.output_prefix}_drag_n": result.drag_n,
                 f"{self.output_prefix}_side_n": result.side_n,
@@ -2248,6 +2464,38 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 f"{self.output_prefix}_my_reference_nm": result.my_reference_nm,
                 f"{self.output_prefix}_mz_reference_nm": result.mz_reference_nm,
             }
+            if self.neuralfoil_mach_polar is not None:
+                try:
+                    import math  # noqa: PLC0415
+                    from multiads.solvers.aerodynamics.neuralfoil import Neuralfoil  # noqa: PLC0415
+                    nf_metrics = Neuralfoil.estimate_profile_drag_from_resolved_stations(
+                        geometry.resolved_stations,
+                        self.environment,
+                        s_ref_m2=s_ref,
+                        y_min_m=0.0,
+                        mach_polar=self.neuralfoil_mach_polar,
+                        cd_min_friction=self.neuralfoil_cd_min_friction,
+                        model=self.neuralfoil_model,
+                        metric_prefix="neuralfoil_full",
+                    )
+                    cd_profile_full = float(nf_metrics.get("neuralfoil_full_profile_cd", 0.0))
+                    cl_w = float(result.cl_wind)
+                    stations = geometry.resolved_stations
+                    span_m = 2.0 * max(float(st.spanwise_y_m) for st in stations) if stations else float("nan")
+                    ar_full = span_m ** 2 / s_ref if s_ref > 0.0 else float("nan")
+                    cd_induced = cl_w ** 2 / (math.pi * ar_full) if math.isfinite(ar_full) else 0.0
+                    cd_total = cd_profile_full + cd_induced
+                    ld_full = cl_w / cd_total if cd_total > 1.0e-14 else float("nan")
+                    values[f"{self.output_prefix}_neuralfoil_full_profile_cd"] = cd_profile_full
+                    values[f"{self.output_prefix}_cd_induced_full_aircraft"] = cd_induced
+                    values[f"{self.output_prefix}_cd_total_full_aircraft"] = cd_total
+                    values[f"{self.output_prefix}_ld_full_aircraft"] = ld_full
+                except Exception:  # noqa: BLE001
+                    _log.warning("NeuralFoil profile drag failed for case '%s'", self.output_prefix)
+                    values[f"{self.output_prefix}_neuralfoil_full_profile_cd"] = 0.0
+                    values[f"{self.output_prefix}_cd_induced_full_aircraft"] = 0.0
+                    values[f"{self.output_prefix}_cd_total_full_aircraft"] = 0.0
+                    values[f"{self.output_prefix}_ld_full_aircraft"] = 0.0
         except Exception as exc:  # noqa: BLE001
             _log.exception(
                 "DUST case '%s' failed: %s",
@@ -2269,6 +2517,9 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 f"{self.output_prefix}_cm": 0.0,
                 f"{self.output_prefix}_cy": 0.0,
                 f"{self.output_prefix}_ld": 0.0,
+                f"{self.output_prefix}_cl_wind": 0.0,
+                f"{self.output_prefix}_cd_wind": 0.0,
+                f"{self.output_prefix}_ld_wind": 0.0,
                 f"{self.output_prefix}_lift_n": 0.0,
                 f"{self.output_prefix}_drag_n": 0.0,
                 f"{self.output_prefix}_side_n": 0.0,
@@ -2279,6 +2530,11 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 f"{self.output_prefix}_my_reference_nm": 0.0,
                 f"{self.output_prefix}_mz_reference_nm": 0.0,
             }
+            if self.neuralfoil_mach_polar is not None:
+                values[f"{self.output_prefix}_neuralfoil_full_profile_cd"] = 0.0
+                values[f"{self.output_prefix}_cd_induced_full_aircraft"] = 0.0
+                values[f"{self.output_prefix}_cd_total_full_aircraft"] = 0.0
+                values[f"{self.output_prefix}_ld_full_aircraft"] = 0.0
 
         return {
             name: np.asarray([value], dtype=float)

@@ -35,6 +35,36 @@ gemseo.configure_logger(
     filemode="w",
 )
 
+_log = logging.getLogger(__name__)
+
+
+def _make_fault_tolerant(discipline, label: str):
+    """Wrap discipline._run so any non-ValueError exception becomes ValueError.
+
+    GEMSEO 6.x CustomDOE only catches ValueError to skip failed samples and
+    continue the DOE.  Any other exception (RuntimeError, OSError, PyGeo crash,
+    …) would kill the entire shard.  This wrapper converts those to ValueError
+    so the sample is skipped and the next one proceeds.
+
+    The DUST discipline handles its own exceptions internally (fail_fast=False),
+    so it does not need this wrapper — only the upstream disciplines do.
+    """
+    original_run = discipline._run
+
+    def _safe_run(input_data):
+        try:
+            return original_run(input_data)
+        except ValueError:
+            raise
+        except Exception as exc:
+            _log.exception(
+                "[%s] evaluation failed; sample will be skipped: %s", label, exc
+            )
+            raise ValueError(f"[{label}] evaluation failed: {exc}") from exc
+
+    discipline._run = _safe_run
+    return discipline
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "CTA_case" / "doe_dust"
@@ -157,6 +187,7 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
         leading_edge_opening_m=args.leading_edge_opening_m,
         mirror_span=True,
     )
+    polar_mach = float(args.polar_mach) if float(args.polar_mach) > 0.0 else None
     return ResolvedGeometryDustDiscipline(
         name="CTADustFromResolvedGeometry",
         geometry_provider=_geometry_provider,
@@ -169,6 +200,9 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
         fail_fast=args.fail_fast,
         reuse_run_directory=not args.store_case_directories,
         run_directory_name=args.run_directory_name,
+        neuralfoil_mach_polar=polar_mach,
+        neuralfoil_cd_min_friction=float(args.polar_cd_min),
+        neuralfoil_model=args.polar_model,
     )
 
 
@@ -181,15 +215,15 @@ def build_cta_dust_doe_scenario(
     mads_scenario = MADSScenario()
     mads_scenario.fill_parameter_space(cta.CTA_DOE_DESIGN_VARIABLES)
     disciplines = [
-        cta.disc_planform_mapping,
-        cta.disc_geometry,
+        _make_fault_tolerant(cta.disc_planform_mapping, "planform_mapping"),
+        _make_fault_tolerant(cta.disc_geometry, "geometry"),
     ]
     if cta.disc_internal_boxes is not None:
-        disciplines.append(cta.disc_internal_boxes)
+        disciplines.append(_make_fault_tolerant(cta.disc_internal_boxes, "internal_boxes"))
     disciplines.extend(
         [
-            cta.disc_geometry_validation,
-            dust_discipline,
+            _make_fault_tolerant(cta.disc_geometry_validation, "geometry_validation"),
+            dust_discipline,  # already fault-tolerant via fail_fast=False
         ],
     )
 
@@ -202,6 +236,12 @@ def build_cta_dust_doe_scenario(
         maximize_objective=False,
     )
 
+    polar_mach = float(args.polar_mach) if float(args.polar_mach) > 0.0 else None
+    nf_observables = (
+        ["cta_dust_neuralfoil_full_profile_cd", "cta_dust_cd_induced_full_aircraft", "cta_dust_cd_total_full_aircraft", "cta_dust_ld_full_aircraft"]
+        if polar_mach is not None
+        else []
+    )
     observables = [
         "cta_dust_success",
         "cta_dust_cl",
@@ -209,6 +249,10 @@ def build_cta_dust_doe_scenario(
         "cta_dust_cm",
         "cta_dust_cy",
         "cta_dust_ld",
+        "cta_dust_cl_wind",
+        "cta_dust_cd_wind",
+        "cta_dust_ld_wind",
+        *nf_observables,
         "cta_dust_lift_n",
         "cta_dust_drag_n",
         "cta_dust_side_n",
@@ -461,6 +505,26 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help="Output directory for the DOE dataset and DUST cases.",
+    )
+    parser.add_argument(
+        "--polar-mach",
+        type=float,
+        default=0.4,
+        help=(
+            "Mach number used for NeuralFoil 2D polars with Prandtl-Glauert correction back "
+            "to flight Mach. Set to 0 to disable NeuralFoil profile drag. Default: 0.4."
+        ),
+    )
+    parser.add_argument(
+        "--polar-cd-min",
+        type=float,
+        default=0.006,
+        help="Minimum friction CD floor for Prandtl-Glauert PG correction. Default: 0.006.",
+    )
+    parser.add_argument(
+        "--polar-model",
+        default="large",
+        help="NeuralFoil model size (small/medium/large/xlarge/xxxlarge). Default: large.",
     )
     return parser.parse_args()
 

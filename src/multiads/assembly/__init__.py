@@ -25,10 +25,7 @@ Optimizable: TypeAlias = Variable[V, N] | T
 
 @dataclass
 class WingGeometrySpec:
-    """User-facing geometry specification attached to a Wing.
-
-    Set this on Wing.geometry instead of using Wing.metadata dicts.
-    """
+    """User-facing geometry specification attached to a Wing."""
 
     # Sampling
     chordwise_points: int = 201

@@ -96,6 +96,8 @@ class Neuralfoil(BaseSolver):
         n_crit: float = 9.0,
         station_stride: int = 1,
         metric_prefix: str = "neuralfoil",
+        mach_polar: float | None = None,
+        cd_min_friction: float = 0.006,
     ) -> dict[str, float]:
         """Estimate an integrated profile-drag contribution from resolved stations.
 
@@ -126,6 +128,14 @@ class Neuralfoil(BaseSolver):
         mach = float(environment.mach)
         reynolds = speed * chord / float(environment.kin_viscosity)
 
+        mach_nf = float(mach_polar) if mach_polar is not None else mach
+        if mach_polar is not None:
+            beta_nf = float(np.sqrt(max(1.0 - mach_nf**2, 1.0e-6)))
+            beta_flight = float(np.sqrt(max(1.0 - mach**2, 1.0e-6)))
+            pg_scale = beta_nf / beta_flight
+        else:
+            pg_scale = 1.0
+
         cd = np.zeros_like(y)
         cl = np.zeros_like(y)
         cm = np.zeros_like(y)
@@ -143,15 +153,18 @@ class Neuralfoil(BaseSolver):
             aero = cls.compute_aero_from_airfoil(
                 airfoil,
                 alphas=float(alpha_local[idx]),
-                mach=mach,
+                mach=mach_nf,
                 reynolds=float(reynolds[idx]),
                 model=model,
                 n_crit=float(n_crit),
                 include_360_deg_effects=True,
             )
-            cd[idx] = float(np.ravel(aero["CD"])[0])
-            cl[idx] = float(np.ravel(aero["CL"])[0])
-            cm[idx] = float(np.ravel(aero["CM"])[0])
+            cd_raw = float(np.ravel(aero["CD"])[0])
+            # Prandtl-Glauert correction: friction drag is Mach-independent,
+            # only the pressure remainder scales.
+            cd[idx] = float(cd_min_friction) + max(cd_raw - float(cd_min_friction), 0.0) * pg_scale
+            cl[idx] = float(np.ravel(aero["CL"])[0]) * pg_scale
+            cm[idx] = float(np.ravel(aero["CM"])[0]) * pg_scale
 
         cd_profile = 2.0 * float(np.trapezoid(cd * chord, y)) / float(s_ref_m2)
         q_pa = 0.5 * float(environment.density) * speed**2
