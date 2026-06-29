@@ -2491,7 +2491,7 @@ class ResolvedGeometryDustDiscipline(Discipline):
                     values[f"{self.output_prefix}_cd_total_full_aircraft"] = cd_total
                     values[f"{self.output_prefix}_ld_full_aircraft"] = ld_full
                 except Exception:  # noqa: BLE001
-                    _log.warning("NeuralFoil profile drag failed for case '%s'", self.output_prefix)
+                    _log.warning("NeuralFoil profile drag failed for case '%s'", self.output_prefix, exc_info=True)
                     values[f"{self.output_prefix}_neuralfoil_full_profile_cd"] = 0.0
                     values[f"{self.output_prefix}_cd_induced_full_aircraft"] = 0.0
                     values[f"{self.output_prefix}_cd_total_full_aircraft"] = 0.0
