@@ -77,7 +77,7 @@ DEFAULT_SAMPLES_CSV = (
     / "samples"
     / "cta_dust_vlm_samples.csv"
 )
-SUPPORTED_DUST_METHODS = ("vlm", "panels")
+SUPPORTED_DUST_METHODS = ("panels",)
 SUPPORTED_SAMPLE_METHODS = ("sobol", "lhs", "halton", "random")
 
 
@@ -145,19 +145,6 @@ def _build_wing_options(args: argparse.Namespace, environment: Environment) -> W
         loads_avg=True,
         loads_reference="0",
     )
-    if args.dust_method == "vlm":
-        return WingOptions(
-            discretization_method=WingMethod.VORTEX_LATTICE,
-            panel_type=WingPanelType.UNIFORM,
-            num_panels=max(1, int(args.mesh_chord_stations) - 1),
-            inner_product_te=0.5,
-            tol_se_wing=1.0e-3,
-            proj_te=True,
-            proj_te_dir="parallel",
-            proj_te_vector=velocity / speed,
-            output_options=output_options,
-        )
-
     return WingOptions(
         discretization_method=WingMethod.PANELS,
         panel_type=WingPanelType.UNIFORM,
@@ -407,8 +394,7 @@ def _build_manifest(
         "notes": [
             (
                 "DUST receives a mesh derived from the resolved geometry, not only "
-                "section definitions. For VLM campaigns this mesh is converted into "
-                "a parametric DUST wing inside dust_lib.py."
+                "section definitions."
             ),
             "CL, CD and CM are normalized using the resolved sample area and MAC.",
             "For this debugging/campaign setup, drag is read from the reference axes without additional wind-axis projection.",
@@ -468,7 +454,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dust-method",
         choices=SUPPORTED_DUST_METHODS,
-        default="vlm",
+        default="panels",
         help="DUST aerodynamic discretization used by the DOE campaign.",
     )
     parser.add_argument("--alpha-deg", type=float, default=3.0, help="DUST angle of attack in degrees.")

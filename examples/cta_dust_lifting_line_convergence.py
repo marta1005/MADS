@@ -27,7 +27,6 @@ from multiads.solvers.aerodynamics.dust_lib import (
     compute_reconstructed_drag_coefficients,
     dust_executable,
     lifting_line_solver_preset,
-    run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry,
     run_dust_lifting_line_case_from_prepared_geometry,
     validate_lifting_line_case,
 )
@@ -582,7 +581,7 @@ def _parse_args() -> argparse.Namespace:
             "to tip — the only region where LL is valid for this BWB (centerbody "
             "chord>>span violates the LL assumption). "
             "Other options: outer_only, full_bwb_anchor_equivalent, resolved, rectangular, "
-            "centerbody_vlm_ll (hybrid: VLM panels for centerbody + LL for outer wing)."
+            ""
         ),
     )
     parser.add_argument("--mesh-flat-options", default="T")
@@ -923,39 +922,20 @@ def main() -> None:
             diagnostics=polar_diagnostics,
         )
         try:
-            if geometry_variant == "centerbody_vlm_ll":
-                result = run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry(
-                    active_geometry_state,
-                    environment=env,
-                    options=options,
-                    s_ref_m2=s_ref_m2,
-                    c_ref_m=c_ref_m,
-                    centerbody_end_y_m=float(args.transition_start_y_m),
-                    centerbody_n_span_stations=6,
-                    centerbody_n_chord_panels=6,
-                    wing_options=wing_options,
-                    clean_run_dir=True,
-                    polar_provider=polar_provider,
-                )
-            else:
-                result = run_dust_lifting_line_case_from_prepared_geometry(
-                    active_geometry_state,
-                    environment=env,
-                    options=options,
-                    s_ref_m2=s_ref_m2,
-                    c_ref_m=c_ref_m,
-                    mesh_settings=mesh_settings,
-                    wing_options=wing_options,
-                    clean_run_dir=True,
-                    component_name=COMPONENT_NAME,
-                    polar_provider=polar_provider,
-                )
-            elapsed_s = time.perf_counter() - start
-            history_component = (
-                "cta_outer_wing"
-                if geometry_variant == "centerbody_vlm_ll"
-                else COMPONENT_NAME
+            result = run_dust_lifting_line_case_from_prepared_geometry(
+                active_geometry_state,
+                environment=env,
+                options=options,
+                s_ref_m2=s_ref_m2,
+                c_ref_m=c_ref_m,
+                mesh_settings=mesh_settings,
+                wing_options=wing_options,
+                clean_run_dir=True,
+                component_name=COMPONENT_NAME,
+                polar_provider=polar_provider,
             )
+            elapsed_s = time.perf_counter() - start
+            history_component = COMPONENT_NAME
             history = (
                 cta_common.read_force_history(
                     run_dir,

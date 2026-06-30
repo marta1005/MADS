@@ -982,21 +982,6 @@ def _default_parametric_wing_options(
     )
 
 
-def _default_parametric_vlm_wing_options(
-    *,
-    environment: assembly.Environment,
-    n_steps: int,
-    n_chord_panels: int,
-    loads_average_window: int = 20,
-) -> WingOptions:
-    return _default_parametric_wing_options(
-        environment=environment,
-        n_steps=n_steps,
-        n_chord_panels=n_chord_panels,
-        method=WingMethod.VORTEX_LATTICE,
-        loads_average_window=loads_average_window,
-    )
-
 
 def _remove_duplicate_dust_output_dirs(run_path: Path, output_dir: Path) -> None:
     """Remove duplicate DUST output folders such as ``Output 2``.
@@ -1080,37 +1065,6 @@ def _prepare_parametric_wing_options(
     return resolved_options
 
 
-def _prepare_parametric_vlm_wing_options(
-    wing_options: WingOptions | None,
-    *,
-    environment: assembly.Environment,
-    n_steps: int,
-    n_chord_panels: int,
-) -> WingOptions:
-    return _prepare_parametric_wing_options(
-        wing_options,
-        environment=environment,
-        n_steps=n_steps,
-        n_chord_panels=n_chord_panels,
-        method=WingMethod.VORTEX_LATTICE,
-    )
-
-
-def _selected_vlm_stations(geometry: PreparedGeometry, n_span_stations: int) -> list[Any]:
-    stations = sorted(
-        geometry.resolved_stations,
-        key=lambda station: float(station.spanwise_y_m),
-    )
-    if len(stations) < 2:
-        msg = "Parametric lifting-surface wing requires at least two resolved stations."
-        raise ValueError(msg)
-    count = min(len(stations), max(2, int(n_span_stations)))
-    indices = np.rint(np.linspace(0, len(stations) - 1, count)).astype(int)
-    unique_indices = []
-    for index in indices:
-        if int(index) not in unique_indices:
-            unique_indices.append(int(index))
-    return [stations[index] for index in unique_indices]
 
 
 def _selected_parametric_stations(
@@ -1527,7 +1481,7 @@ def _build_parametric_wing_from_geometry(
     method_label = (
         "lifting_line"
         if wing_options.method is WingMethod.LIFTING_LINE
-        else "vlm"
+        else "parametric"
     )
     profile_dir = run_path / "geometry" / f"{method_label}_profiles"
     sections: list[assembly.Section] = []
@@ -1840,43 +1794,6 @@ def run_dust_case_from_resolved_npz(
     return result
 
 
-def run_dust_vlm_case_from_prepared_geometry(
-    geometry: PreparedGeometry,
-    *,
-    environment: assembly.Environment,
-    options: Options,
-    s_ref_m2: float,
-    c_ref_m: float,
-    mesh_settings: DustMeshSettings | None = None,
-    wing_options: WingOptions | None = None,
-    clean_run_dir: bool = True,
-    component_name: str = "cta_wing",
-    result_file_name: str = "dust_result.json",
-) -> DustCaseResult:
-    """Run one DUST VLM case from resolved geometry stations.
-
-    The panel runner sends DUST a closed upper/lower-skin mesh. VLM expects a
-    lifting surface, so this runner converts the resolved CTA stations into a
-    parametric DUST wing: airfoil sections, span segments, sweep/dihedral,
-    chordwise panel count and symmetry. No CTA-specific geometry is hardcoded
-    here; the station data comes from the synthesis geometry object.
-    """
-
-    return _run_dust_parametric_case_from_prepared_geometry(
-        geometry,
-        environment=environment,
-        options=options,
-        s_ref_m2=s_ref_m2,
-        c_ref_m=c_ref_m,
-        method=WingMethod.VORTEX_LATTICE,
-        mesh_settings=mesh_settings,
-        wing_options=wing_options,
-        clean_run_dir=clean_run_dir,
-        component_name=component_name,
-        result_file_name=result_file_name,
-        polar_provider=None,
-    )
-
 
 def run_dust_lifting_line_case_from_prepared_geometry(
     geometry: PreparedGeometry,
@@ -1918,203 +1835,6 @@ def run_dust_lifting_line_case_from_prepared_geometry(
         result_file_name=result_file_name,
         polar_provider=polar_provider,
     )
-
-
-def run_dust_hybrid_centerbody_vlm_outer_ll_case_from_prepared_geometry(
-    geometry: PreparedGeometry,
-    *,
-    environment: assembly.Environment,
-    options: Options,
-    s_ref_m2: float,
-    c_ref_m: float,
-    centerbody_end_y_m: float = 12.5,
-    centerbody_n_span_stations: int = 6,
-    centerbody_n_chord_panels: int = 6,
-    outer_mesh_settings: DustMeshSettings | None = None,
-    wing_options: WingOptions | None = None,
-    clean_run_dir: bool = True,
-    centerbody_component_name: str = "cta_centerbody",
-    outer_component_name: str = "cta_outer_wing",
-    result_file_name: str = "dust_result.json",
-    polar_provider: Callable[
-        [assembly.Environment, assembly.Wing, Mapping[str, "PolarVariable"]],
-        None,
-    ]
-    | None = None,
-) -> DustCaseResult:
-    """Hybrid DUST run: VLM panels for centerbody + LL for outer wing.
-
-    The centerbody (low AR, LL not valid) is modeled with inviscid VLM panels.
-    The outer wing (high AR) is modeled with viscous LL using C81 polars.
-    Both components run in the same DUST simulation and interact through their
-    shared wake system, so the centerbody downwash on the outer wing is captured
-    correctly.  Forces from both components are summed to give the full-span CL.
-    """
-    from multiads.solvers.aerodynamics.dust import DUST
-
-    cb_mesh = DustMeshSettings(
-        n_span_stations=int(centerbody_n_span_stations),
-        n_chord_stations=int(centerbody_n_chord_panels) + 1,
-        span_max_y_m=float(centerbody_end_y_m),
-    )
-    if outer_mesh_settings is None:
-        outer_mesh_settings = DustMeshSettings(
-            n_span_stations=3,
-            n_chord_stations=1,
-            lifting_line_geometry_mode="transition_outer",
-            lifting_line_root_chord_scale=0.001,
-            lifting_line_blend_root_to_start=True,
-        )
-
-    case_options = copy.deepcopy(options)
-    if case_options.run_directory is None:
-        msg = "Options.run_directory must be set for hybrid DUST runs."
-        raise ValueError(msg)
-    run_path = Path(case_options.run_directory)
-    case_options.keep_run_directory = True
-    if clean_run_dir and run_path.exists():
-        shutil.rmtree(run_path)
-    (run_path / "geometry").mkdir(parents=True, exist_ok=True)
-    (run_path / case_options.output_dir).mkdir(parents=True, exist_ok=True)
-    (run_path / case_options.post_dir).mkdir(parents=True, exist_ok=True)
-
-    env = copy.deepcopy(environment)
-    speed = float(env.speed)
-    n_steps = _n_steps_from_options(case_options)
-
-    cb_wing_options = _prepare_parametric_wing_options(
-        wing_options,
-        environment=env,
-        n_steps=n_steps,
-        n_chord_panels=int(centerbody_n_chord_panels),
-        method=WingMethod.VORTEX_LATTICE,
-    )
-    outer_wing_options = _prepare_parametric_wing_options(
-        wing_options,
-        environment=env,
-        n_steps=n_steps,
-        n_chord_panels=0,
-        method=WingMethod.LIFTING_LINE,
-    )
-
-    # Use only named anchor stations for the centerbody VLM.  The resolved geometry
-    # has hundreds of dense helper stations near y=0 with near-zero span and extreme
-    # sweep angles (~65°) that make VLM panels degenerate and produce NaN forces.
-    # Anchor stations (cta_s0, cta_s1, cta_s1a, cta_s2, cta_s3, cta_s4) have spans
-    # of 1.9–4.5 m and give stable VLM panels.
-    all_stations = sorted(
-        geometry.resolved_stations,
-        key=lambda s: float(s.spanwise_y_m),
-    )
-    cb_anchor_stations = [
-        s
-        for s in all_stations
-        if float(s.spanwise_y_m) <= float(centerbody_end_y_m) + 1.0e-6
-        and _is_named_anchor_station(s)
-    ]
-    if len(cb_anchor_stations) < 2:
-        msg = (
-            f"Centerbody VLM needs at least 2 anchor stations below y={centerbody_end_y_m} m; "
-            f"found {len(cb_anchor_stations)}."
-        )
-        raise ValueError(msg)
-    cb_anchor_geometry = SimpleNamespace(resolved_stations=cb_anchor_stations)
-    cb_anchor_mesh = DustMeshSettings(
-        n_span_stations=len(cb_anchor_stations),
-        n_chord_stations=int(centerbody_n_chord_panels) + 1,
-    )
-    wing_cb, _ = _build_parametric_wing_from_geometry(
-        cb_anchor_geometry,
-        run_path,
-        component_name=centerbody_component_name,
-        mesh_settings=cb_anchor_mesh,
-        wing_options=cb_wing_options,
-    )
-    wing_outer, outer_mesh_info = _build_parametric_wing_from_geometry(
-        geometry,
-        run_path,
-        component_name=outer_component_name,
-        mesh_settings=outer_mesh_settings,
-        wing_options=outer_wing_options,
-    )
-
-    if polar_provider is None:
-        msg = "Hybrid VLM+LL case requires a polar_provider for the LL outer wing."
-        raise RuntimeError(msg)
-
-    dust_solver = DUST(options=case_options)
-    components = dust_solver.parse_variables([env, wing_cb, wing_outer])
-    if dust_solver.polars is None:
-        msg = "DUST did not allocate polar inputs for the LL outer wing."
-        raise RuntimeError(msg)
-    polar_provider(env, wing_outer, dust_solver.polars)
-    _validate_lifting_line_polars(dust_solver.polars, env)
-
-    dust_solver.run(components)
-    dust_solver.compute_output()
-    _remove_duplicate_dust_output_dirs(run_path, case_options.output_dir)
-    if dust_solver.outputs_map is None:
-        msg = "DUST did not expose output variables."
-        raise RuntimeError(msg)
-
-    force_cb = np.asarray(
-        dust_solver.outputs_map[f"{centerbody_component_name}.force"].value,
-        dtype=float,
-    )
-    moment_cb = np.asarray(
-        dust_solver.outputs_map[f"{centerbody_component_name}.moment"].value,
-        dtype=float,
-    )
-    force_outer = np.asarray(
-        dust_solver.outputs_map[f"{outer_component_name}.force"].value,
-        dtype=float,
-    )
-    moment_outer = np.asarray(
-        dust_solver.outputs_map[f"{outer_component_name}.moment"].value,
-        dtype=float,
-    )
-
-    force_total = force_cb + force_outer
-    moment_total = moment_cb + moment_outer
-
-    if not np.all(np.isfinite(force_total)) or not np.all(np.isfinite(moment_total)):
-        msg = "Hybrid VLM+LL case returned non-finite loads."
-        raise RuntimeError(msg)
-
-    q_inf = 0.5 * float(env.density) * speed**2
-    loads_norm = normalize_reference_loads(
-        force_total,
-        moment_total,
-        q_inf,
-        float(s_ref_m2),
-        float(c_ref_m),
-        env,
-    )
-    result = DustCaseResult(
-        alpha_deg=float(env.alpha),
-        mach=float(env.mach),
-        altitude_ft=float(env.height / 0.3048),
-        disa_k=float(getattr(env, "disa_k", 0.0)),
-        speed_mps=float(speed),
-        rho_kg_m3=float(env.density),
-        q_pa=float(q_inf),
-        s_ref_m2=float(s_ref_m2),
-        c_ref_m=float(c_ref_m),
-        fx_reference_n=float(force_total[0]),
-        fy_reference_n=float(force_total[1]),
-        fz_reference_n=float(force_total[2]),
-        mx_reference_nm=float(moment_total[0]),
-        my_reference_nm=float(moment_total[1]),
-        mz_reference_nm=float(moment_total[2]),
-        run_dir=str(run_path),
-        mesh_info=outer_mesh_info,
-        **loads_norm,
-    )
-    (run_path / result_file_name).write_text(
-        json.dumps(result.to_flat_dict(), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    return result
 
 
 def _run_dust_parametric_case_from_prepared_geometry(
@@ -2401,18 +2121,7 @@ class ResolvedGeometryDustDiscipline(Discipline):
                 None if self.wing_options is None else copy.deepcopy(self.wing_options)
             )
             wing_method = None if case_wing_options is None else case_wing_options.method
-            if wing_method is WingMethod.VORTEX_LATTICE:
-                result = run_dust_vlm_case_from_prepared_geometry(
-                    geometry,
-                    environment=self.environment,
-                    options=case_options,
-                    s_ref_m2=s_ref,
-                    c_ref_m=c_ref,
-                    mesh_settings=self.mesh_settings,
-                    wing_options=case_wing_options,
-                    result_file_name=f"{self.output_prefix}_result.json",
-                )
-            elif wing_method is WingMethod.LIFTING_LINE:
+            if wing_method is WingMethod.LIFTING_LINE:
                 if self.polar_provider is None:
                     msg = (
                         "ResolvedGeometryDustDiscipline: wing_options.method is "
@@ -3288,12 +2997,6 @@ class Wing:
                 f"nelem_chord = {self.num_panels}\n",
                 f"type_chord = {self.panel_type.value}\n",
             ]
-
-        # Handle non-linear VLM  # TODO @Andres: Set to False now
-        if self.method == WingMethod.VORTEX_LATTICE and any(
-            sec.polar for sec in self.sections
-        ):
-            out += ["airfoil_table_correction = F\n"]
 
         return out
 
