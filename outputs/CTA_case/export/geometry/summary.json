@@ -59,23 +59,23 @@
     },
     "cta_twist_s4_deg": {
       "baseline": 0.483,
-      "lower_bound": -3.517,
-      "upper_bound": 4.483
+      "lower_bound": -1.517,
+      "upper_bound": 2.483
     },
     "cta_twist_s4a_deg": {
       "baseline": 1.381,
-      "lower_bound": -2.619,
-      "upper_bound": 5.381
+      "lower_bound": -0.619,
+      "upper_bound": 3.381
     },
     "cta_twist_s4b_deg": {
       "baseline": 2.279,
-      "lower_bound": -1.721,
-      "upper_bound": 6.279
+      "lower_bound": 0.279,
+      "upper_bound": 4.279
     },
     "cta_twist_s5_deg": {
       "baseline": 3.177,
-      "lower_bound": -0.823,
-      "upper_bound": 7.177
+      "lower_bound": 1.177,
+      "upper_bound": 5.177
     }
   },
   "export_outputs": {
