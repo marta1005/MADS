@@ -235,17 +235,30 @@ def fig_aero(df: pd.DataFrame, out_dir: Path) -> None:
             ax_geo.tick_params(labelsize=8)
 
     # --- filas siguientes: histogramas aero ---
+    nf_drag_cols = {
+        "outputs.cta_dust_cd_total_full_aircraft",
+        "outputs.cta_dust_neuralfoil_full_profile_cd",
+        "outputs.cta_dust_cd_induced_full_aircraft",
+        "outputs.cta_dust_ld_full_aircraft",
+    }
     for i, (col, label, lo, hi) in enumerate(aero_cols):
         ax = fig.add_subplot(total_rows, ncols, ncols + 1 + i)
         vals = _clipped(df_ok, col, lo, hi)
+        # excluir ceros solo en columnas de drag NF (casos donde NF falló)
+        if col in nf_drag_cols:
+            vals = vals[vals > 1e-9]
         if len(vals) < 2:
             ax.set_visible(False)
             continue
+        # clip adicional p1–p99 para quitar outliers extremos
+        p1, p99 = vals.quantile(0.01), vals.quantile(0.99)
+        n_total_ok = len(vals)
+        vals = vals[(vals >= p1) & (vals <= p99)]
+        n_out = len(df_ok) - len(vals)
         ax.hist(vals, bins=60, color="#4C72B0", alpha=0.85, edgecolor="none")
         med  = vals.median()
         p5   = vals.quantile(0.05)
         p95  = vals.quantile(0.95)
-        n_out = len(df_ok) - len(vals)
         ax.axvline(med, color="red",    linewidth=1.4, linestyle="--", label=f"p50={med:.3g}")
         ax.axvline(p5,  color="orange", linewidth=0.9, linestyle=":",  label=f"p5={p5:.3g}")
         ax.axvline(p95, color="orange", linewidth=0.9, linestyle=":",  label=f"p95={p95:.3g}")
