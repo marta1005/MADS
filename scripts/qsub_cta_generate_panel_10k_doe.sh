@@ -22,7 +22,7 @@ set -euo pipefail
 
 DEFAULT_N_SAMPLES=10000
 DEFAULT_CASES_PER_WORKER=100
-DEFAULT_CAMPAIGN_ROOT="outputs/CTA_case/datasets/campaign_panel_10k"
+DEFAULT_CAMPAIGN_ROOT="outputs/CTA_case/datasets/campaign_panel_10k_cp"
 DEFAULT_SAMPLE_METHOD="sobol"
 DEFAULT_SAMPLE_SEED=42
 

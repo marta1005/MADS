@@ -32,7 +32,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 DEFAULT_CASES_PER_WORKER=100
-DEFAULT_CAMPAIGN_ROOT="outputs/CTA_case/datasets/campaign_panel_10k"
+DEFAULT_CAMPAIGN_ROOT="outputs/CTA_case/datasets/campaign_panel_10k_cp"
 DEFAULT_SAMPLES_CSV="${DEFAULT_CAMPAIGN_ROOT}/samples/cta_dust_panel_samples.csv"
 DEFAULT_N_STEPS=70
 DEFAULT_DUST_THREADS=6
