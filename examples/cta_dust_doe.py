@@ -121,14 +121,14 @@ def _build_dust_options(args: argparse.Namespace, environment: Environment) -> O
         particles_box_max=np.asarray((380.0, 90.0, 80.0), dtype=float),
         penetration_avoidance=False,
         output_options=OutputOptions(
-            visualization=not args.no_vtk,
+            visualization=True,
             viz_start=n_steps,
             viz_end=n_steps,
             viz_step=1,
             viz_fmt="vtk",
-            viz_wake=True,
-            viz_separate_wake=True,
-            viz_variables=["cp", "vorticity_vector", "velocity"],
+            viz_wake=False,
+            viz_separate_wake=False,
+            viz_variables=["cp"],
         ),
     )
 
