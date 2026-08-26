@@ -22,13 +22,13 @@ from pathlib import Path
 import numpy as np
 
 
-def _find_vtk_files(campaign_root: Path) -> list[tuple[int, Path]]:
+def _find_vtu_files(campaign_root: Path) -> list[tuple[int, Path]]:
     pattern = re.compile(r"sample_(\d+)_")
     results = []
-    for vtk_path in campaign_root.glob("shards/*/cases/*/post/dust_cta_wing_*.vtk"):
-        m = pattern.search(vtk_path.parent.parent.name)
+    for vtu_path in campaign_root.glob("shards/*/cases/*/post/*_visualization-*.vtu"):
+        m = pattern.search(vtu_path.parent.parent.name)
         if m:
-            results.append((int(m.group(1)), vtk_path))
+            results.append((int(m.group(1)), vtu_path))
     return sorted(results)
 
 
@@ -79,12 +79,12 @@ def main() -> None:
     output = args.output or args.campaign_root / "cp_dataset.npz"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    vtk_files = _find_vtk_files(args.campaign_root)
+    vtk_files = _find_vtu_files(args.campaign_root)
     if not vtk_files:
-        print("No VTK files found. Check --campaign-root and that --store-case-directories was used.")
+        print("No .vtu files found. Check --campaign-root and that --store-case-directories was used.")
         return
 
-    print(f"Found {len(vtk_files)} VTK files. Extracting Cp...")
+    print(f"Found {len(vtk_files)} .vtu files. Extracting Cp...")
 
     cp_list: list[np.ndarray] = []
     xc_list: list[np.ndarray] = []
@@ -94,7 +94,7 @@ def main() -> None:
     for i, (sample_idx, vtk_path) in enumerate(vtk_files):
         result = _extract_case(vtk_path)
         if result is None:
-            print(f"  [{i+1}/{len(vtk_files)}] skip — no cp field: {vtk_path}")
+            print(f"  [{i+1}/{len(vtk_files)}] skip — no cp field: {vtk_path.name}")
             continue
         cp, xc, yb = result
         cp_list.append(cp)
