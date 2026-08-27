@@ -56,10 +56,10 @@ def _extract_case(vtk_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] |
     import pyvista as pv
 
     mesh = pv.read(str(vtk_path))
-    if "cp" not in mesh.cell_data:
+    if "Cp" not in mesh.cell_data:
         return None
 
-    cp = np.asarray(mesh.cell_data["cp"], dtype=np.float32)
+    cp = np.asarray(mesh.cell_data["Cp"], dtype=np.float32)
     centers = np.asarray(mesh.cell_centers().points, dtype=np.float64)
     x_over_c, y_over_b = _normalized_coords(centers[:, 0], centers[:, 1])
     return cp, x_over_c, y_over_b
