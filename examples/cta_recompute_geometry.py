@@ -33,6 +33,10 @@ for _p in (str(_REPO_ROOT / "src"), str(_EXAMPLES_DIR)):
 
 import cta_geometry as cta  # noqa: E402  (both files live in examples/)
 
+# mlg1_vertex_variables only exists when CTA_INTERNAL_VOLUME_CONSTRAINTS is not None
+# AND the constraints file contains an MLG_1 surface — use getattr to be safe.
+_MLG1_VARS: list = getattr(cta, "mlg1_vertex_variables", [])
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,7 +117,7 @@ def _evaluate_row(row: "pd.Series", col_map: dict[str, str]) -> dict[str, float]
     if cta.CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
         result[cta.all_boxes_fit.name] = all_boxes_fit
         result[cta.internal_boxes_min_margin.name] = min_margin
-        for var, val in zip(cta.mlg1_vertex_variables, vertex_margins):
+        for var, val in zip(_MLG1_VARS, vertex_margins):
             result[var.name] = val
     result[cta.geometry_valid.name] = float(geom_valid)
     result[cta.geometry_failure_code.name] = float(geom_failure_code)
@@ -129,7 +133,7 @@ def _nan_row() -> dict[str, float]:
     if cta.CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
         result[cta.all_boxes_fit.name] = float("nan")
         result[cta.internal_boxes_min_margin.name] = float("nan")
-        for var in cta.mlg1_vertex_variables:
+        for var in _MLG1_VARS:
             result[var.name] = float("nan")
     result[cta.geometry_valid.name] = float("nan")
     result[cta.geometry_failure_code.name] = float("nan")
