@@ -102,6 +102,7 @@ class IndicatorSurfaceResult:
     critical_target_z_m: float
     critical_geometry_z_m: float
     critical_clearance_m: float
+    vertex_margins_m: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +332,14 @@ def _evaluate_indicator_surface(
         clearance_volume = float("-inf")
         satisfied = False
 
+    verts = surface.vertices_xyz_m
+    z_verts = evaluator.evaluate_points(verts[:, 0], verts[:, 1], surface.sense)
+    if surface.sense == "upper":
+        v_margin = z_verts - (verts[:, 2] + surface.minimum_clearance_m)
+    else:
+        v_margin = (verts[:, 2] - surface.minimum_clearance_m) - z_verts
+    vertex_margins_m = tuple(float(m) for m in v_margin)
+
     return IndicatorSurfaceResult(
         label=surface.label,
         category=surface.category,
@@ -348,6 +357,7 @@ def _evaluate_indicator_surface(
         critical_target_z_m=float(required_z[critical_idx]),
         critical_geometry_z_m=float(z_geometry[critical_idx]),
         critical_clearance_m=float(clearance[critical_idx]),
+        vertex_margins_m=vertex_margins_m,
     )
 
 

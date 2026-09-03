@@ -929,16 +929,14 @@ internal_boxes_min_margin = VariableFloat("cta_internal_boxes_min_margin_m", 0.0
 box_result_variables: list[VariableFloat] = []
 if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
     box_result_variables.extend([all_boxes_fit, internal_boxes_min_margin])
-    for idx, surface in enumerate(CTA_INTERNAL_VOLUME_CONSTRAINTS.surfaces, start=1):
-        safe_label = re.sub(r"[^0-9a-zA-Z]+", "_", surface.label).strip("_").lower()
-        box_result_variables.extend(
-            [
-                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_fits", 0.0),
-                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_margin_m", 0.0),
-                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_footprint_area_m2", 0.0),
-                VariableFloat(f"cta_box_{idx:02d}_{safe_label}_clearance_volume_m3", 0.0),
-            ],
-        )
+    _mlg1_spec = next(
+        s for s in CTA_INTERNAL_VOLUME_CONSTRAINTS.surfaces if s.sub_category == "MLG_1"
+    )
+    mlg1_vertex_variables = [
+        VariableFloat(f"cta_mlg1_vertex_{i + 1:02d}_margin_m", 0.0)
+        for i in range(len(_mlg1_spec.vertices_xyz_m))
+    ]
+    box_result_variables.extend(mlg1_vertex_variables)
 
 
 def _evaluate_internal_boxes_from_last_geometry(*_geometry_metrics):  # noqa: ANN002, ANN201
@@ -957,20 +955,12 @@ def _evaluate_internal_boxes_from_last_geometry(*_geometry_metrics):  # noqa: AN
         CTA_INTERNAL_VOLUME_CONSTRAINTS,
         triangle_resolution=TRIANGLE_RESOLUTION,
     )
-    outputs = [
+    mlg1_result = next(r for r in result.surface_results if r.sub_category == "MLG_1")
+    return (
         1.0 if result.satisfied else 0.0,
         result.minimum_margin_m,
-    ]
-    for surface_result in result.surface_results:
-        outputs.extend(
-            [
-                1.0 if surface_result.satisfied else 0.0,
-                surface_result.worst_margin_m,
-                surface_result.footprint_area_m2,
-                surface_result.clearance_volume_m3,
-            ],
-        )
-    return tuple(outputs)
+        *mlg1_result.vertex_margins_m,
+    )
 
 
 def _validate_cta_geometry(*values):  # noqa: ANN002, ANN201
