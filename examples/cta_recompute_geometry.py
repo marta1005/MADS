@@ -23,12 +23,15 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Make sure the MADS source is importable when run from the repo root
+# Make sure the MADS source and examples/ are importable when run from anywhere
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "src"))
+_EXAMPLES_DIR = Path(__file__).resolve().parent
+for _p in (str(_REPO_ROOT / "src"), str(_EXAMPLES_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-import examples.cta_geometry as cta  # noqa: E402  (after sys.path patch)
+import cta_geometry as cta  # noqa: E402  (both files live in examples/)
 
 
 # ---------------------------------------------------------------------------
