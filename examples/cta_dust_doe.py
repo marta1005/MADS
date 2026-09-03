@@ -203,6 +203,7 @@ def _build_dust_discipline(args: argparse.Namespace) -> ResolvedGeometryDustDisc
         neuralfoil_mach_polar=polar_mach,
         neuralfoil_cd_min_friction=float(args.polar_cd_min),
         neuralfoil_model=args.polar_model,
+        output_prefix="bwb_dust",
     )
 
 
@@ -230,7 +231,7 @@ def build_cta_dust_doe_scenario(
     mads_scenario.create_scenario(
         disciplines=disciplines,
         formulation="DisciplinaryOpt",
-        objective_name="cta_dust_failure_code",
+        objective_name="bwb_dust_failure_code",
         scenario_type="DOE",
         name="cta_dust_doe",
         maximize_objective=False,
@@ -238,30 +239,30 @@ def build_cta_dust_doe_scenario(
 
     polar_mach = float(args.polar_mach) if float(args.polar_mach) > 0.0 else None
     nf_observables = (
-        ["cta_dust_neuralfoil_full_profile_cd", "cta_dust_cd_induced_full_aircraft", "cta_dust_cd_total_full_aircraft", "cta_dust_ld_full_aircraft"]
+        ["bwb_dust_neuralfoil_full_profile_cd", "bwb_dust_cd_induced_full_aircraft", "bwb_dust_cd_total_full_aircraft", "bwb_dust_ld_full_aircraft"]
         if polar_mach is not None
         else []
     )
     observables = [
-        "cta_dust_success",
-        "cta_dust_cl",
-        "cta_dust_cd",
-        "cta_dust_cm",
-        "cta_dust_cy",
-        "cta_dust_ld",
-        "cta_dust_cl_wind",
-        "cta_dust_cd_wind",
-        "cta_dust_ld_wind",
+        "bwb_dust_success",
+        "bwb_dust_cl",
+        "bwb_dust_cd",
+        "bwb_dust_cm",
+        "bwb_dust_cy",
+        "bwb_dust_ld",
+        "bwb_dust_cl_wind",
+        "bwb_dust_cd_wind",
+        "bwb_dust_ld_wind",
         *nf_observables,
-        "cta_dust_lift_n",
-        "cta_dust_drag_n",
-        "cta_dust_side_n",
-        "cta_dust_fx_reference_n",
-        "cta_dust_fy_reference_n",
-        "cta_dust_fz_reference_n",
-        "cta_dust_mx_reference_nm",
-        "cta_dust_my_reference_nm",
-        "cta_dust_mz_reference_nm",
+        "bwb_dust_lift_n",
+        "bwb_dust_drag_n",
+        "bwb_dust_side_n",
+        "bwb_dust_fx_reference_n",
+        "bwb_dust_fy_reference_n",
+        "bwb_dust_fz_reference_n",
+        "bwb_dust_mx_reference_nm",
+        "bwb_dust_my_reference_nm",
+        "bwb_dust_mz_reference_nm",
         *(variable.name for variable in cta.GEOMETRY_METRIC_VARIABLES),
         *(
             variable.name

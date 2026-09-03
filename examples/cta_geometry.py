@@ -801,10 +801,10 @@ cta_planform_mapping_outputs = [
     te_s5,
 ]
 
-geometry_valid = VariableFloat("cta_geometry_valid", 1.0)
-geometry_failure_code = VariableFloat("cta_geometry_failure_code", 0.0)
-packaging_valid = VariableFloat("cta_packaging_valid", 1.0)
-packaging_min_margin = VariableFloat("cta_packaging_min_margin_m", 0.0)
+geometry_valid = VariableFloat("bwb_geometry_valid", 1.0)
+geometry_failure_code = VariableFloat("bwb_geometry_failure_code", 0.0)
+packaging_valid = VariableFloat("bwb_packaging_valid", 1.0)
+packaging_min_margin = VariableFloat("bwb_packaging_min_margin_m", 0.0)
 validation_result_variables = [
     geometry_valid,
     geometry_failure_code,
@@ -924,8 +924,8 @@ CTA_INTERNAL_VOLUME_CONSTRAINTS = (
     else None
 )
 
-all_boxes_fit = VariableFloat("cta_all_boxes_fit", 1.0)
-internal_boxes_min_margin = VariableFloat("cta_internal_boxes_min_margin_m", 0.0)
+all_boxes_fit = VariableFloat("bwb_all_boxes_fit", 1.0)
+internal_boxes_min_margin = VariableFloat("bwb_internal_boxes_min_margin_m", 0.0)
 box_result_variables: list[VariableFloat] = []
 if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
     box_result_variables.extend([all_boxes_fit, internal_boxes_min_margin])
@@ -933,7 +933,7 @@ if CTA_INTERNAL_VOLUME_CONSTRAINTS is not None:
         s for s in CTA_INTERNAL_VOLUME_CONSTRAINTS.surfaces if s.sub_category == "MLG_1"
     )
     mlg1_vertex_variables = [
-        VariableFloat(f"cta_mlg1_vertex_{i + 1:02d}_margin_m", 0.0)
+        VariableFloat(f"bwb_mlg1_vertex_{i + 1:02d}_margin_m", 0.0)
         for i in range(len(_mlg1_spec.vertices_xyz_m))
     ]
     box_result_variables.extend(mlg1_vertex_variables)
