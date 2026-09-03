@@ -75,9 +75,15 @@ def _evaluate_row(row: "pd.Series", col_map: dict[str, str]) -> dict[str, float]
         for var_name, col in col_map.items()
     }
 
-    # 1. Resolve geometry
+    # 1. Map DOE design variables → planform/CST parameters
     try:
-        geometry_outputs = cta.disc_geometry.execute(input_data=input_data)
+        planform_outputs = cta.disc_planform_mapping.execute(input_data=input_data)
+    except Exception:
+        return _nan_row()
+
+    # 2. Resolve geometry (needs planform outputs, not raw design vars)
+    try:
+        geometry_outputs = cta.disc_geometry.execute(input_data=planform_outputs)
     except Exception:
         return _nan_row()
 
@@ -225,5 +231,35 @@ def main() -> None:
     print(f"  merged = aero.merge(geo, on='sample_index', suffixes=('', '_geo'))")
 
 
+def merge() -> None:
+    """Join an aero flat dataset with a geometry dataset on row order."""
+    parser = argparse.ArgumentParser(description="Merge aero and geometry datasets.")
+    parser.add_argument("--aero", type=Path, required=True, help="Aero flat dataset CSV.")
+    parser.add_argument("--geo", type=Path, required=True, help="Geometry dataset CSV (from --recompute).")
+    parser.add_argument("--output", type=Path, default=None, help="Output merged CSV.")
+    args = parser.parse_args()
+
+    aero = pd.read_csv(args.aero.expanduser().resolve(), low_memory=False)
+    geo = pd.read_csv(args.geo.expanduser().resolve(), low_memory=False)
+
+    # Drop geometry columns that already exist in aero to avoid duplicates
+    overlap = [c for c in geo.columns if c != "sample_index" and c in aero.columns]
+    if overlap:
+        print(f"  Dropping {len(overlap)} columns already in aero: {overlap}")
+        geo = geo.drop(columns=overlap)
+
+    merged = aero.merge(geo, left_index=True, right_on="sample_index", how="left")
+    merged = merged.drop(columns=["sample_index"], errors="ignore")
+
+    output = args.output or args.aero.parent / "bwb_full_dataset.csv"
+    merged.to_csv(output.expanduser().resolve(), index=False)
+    print(f"Saved merged dataset: {output}  ({len(merged)} rows, {len(merged.columns)} columns)")
+
+
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    if "--merge" in _sys.argv:
+        _sys.argv.remove("--merge")
+        merge()
+    else:
+        main()
