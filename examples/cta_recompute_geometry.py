@@ -169,14 +169,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    dataset_path = args.dataset.expanduser()
-    if not dataset_path.is_absolute():
-        # Try relative to examples/ first (where datasets live), then CWD
-        candidates = [(_EXAMPLES_DIR / dataset_path).resolve(), dataset_path.resolve()]
-        dataset_path = next((p for p in candidates if p.exists()), candidates[0])
-    else:
-        dataset_path = dataset_path.resolve()
-
+    dataset_path = args.dataset.expanduser().resolve()
     if not dataset_path.exists():
         print(f"ERROR: dataset not found: {dataset_path}", file=sys.stderr)
         sys.exit(1)
