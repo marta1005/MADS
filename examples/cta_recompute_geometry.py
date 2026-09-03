@@ -171,8 +171,8 @@ def main() -> None:
 
     dataset_path = args.dataset.expanduser()
     if not dataset_path.is_absolute():
-        # Try CWD first, then relative to this script's directory (examples/)
-        candidates = [dataset_path.resolve(), (_EXAMPLES_DIR / dataset_path).resolve()]
+        # Try relative to examples/ first (where datasets live), then CWD
+        candidates = [(_EXAMPLES_DIR / dataset_path).resolve(), dataset_path.resolve()]
         dataset_path = next((p for p in candidates if p.exists()), candidates[0])
     else:
         dataset_path = dataset_path.resolve()
